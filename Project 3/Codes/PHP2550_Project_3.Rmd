@@ -1,0 +1,1265 @@
+---
+title: "Evaluating the Transportability of a Cardiovascular Risk Model Across Different Populations"
+author: "Jialin Liu"
+date: "2023-12-15"
+output: pdf_document
+bibliography: Project_3_references.bib
+---
+
+```{r setup, message=FALSE, warning=FALSE, echo=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE, message=FALSE, fig.align = 'center')
+library(riskCommunicator)
+library(tidyverse)
+library(dplyr)
+library(tableone)
+library(mice)
+library(data.table)
+library(fitdistrplus)
+library(corrplot)
+library(logspline)
+library(kableExtra)
+library(MASS)
+library(ggplot2)
+library(ggpubr)
+```
+
+# Abstract
+
+**Background:** Driven by applying prediction models in specific target populations, this project aimed to assess generalizability of cardiovascular disease (CVD) risk model from the Framingham Heart Study to other target populations that only covariates are available, and conducted a simulation study by generating three different simulation cases when individual-level datasets are not available and evaluated performance based on Brier scores.
+
+**Methods:** A simulation approach was used to assess the performance of a cardiovascular risk model in various simulated populations, where individual-level data was not available. The evaluation involved calculating the mean and standard deviation of estimates of Brier scores across different data generation scenarios, including varying simulation sizes. These metrics were then compared with the Brier scores obtained from the original target population, specifically the NHANES-2017 dataset, to understand the model's transportability and accuracy.
+
+**Results:** The first simulation case achieved the lowest average Brier score of 0.1813 for males
+and 0.0326 for females, outperforming the NHANES data with scores of 0.1885 for males and 0.0408 for females. 
+
+**Conclusions:** The minimal relative biases in our study suggest that the simulated data effectively replicates the covariate distributions found in the NHANES sample, enabling reliable transportability analysis in the target population when individual-level data is unavailable. Furthermore, the comparative analysis across three simulation scenarios underscores the importance of including covariate associations when simulating target populations, highlighting the critical role these associations play in enhancing the accuracy of simulation studies.
+
+# Introduction
+
+Users of prediction models want to apply the models in a specific target population. Prediction models are often developed from samples in source populations, however, models cannot be directly applied to the target population since datasets are typically not random sample from the target population, even distributions of observed variables are totally different between source and target populations[@Steingrimsson2022]. Consequently, models built using the data from source population are not applicable to the target population so that model performance evaluation in the source population cannot perfectly reflect performance in the target population unless using tailored prediction models as an attractive alternative to evaluate performance in the target population to achieve transportability tasks[@Steingrimsson2022]. In many cases, both covariates and outcome are available in source populations, whereas only covariates are available in target populations without prior information about outcomes. Under the lack of outcomes in target populations, we tailor prediction models given outcomes information from the source population and assess performance of models for datasets with covariates only based on estimated Brier risk scores.
+
+## The Framingham Heart Study
+
+It is widely accepted that age, sex, high blood pressure, smoking, dyslipidemia, and diabetes are the major risk factors for developing cardiovascular disease (CVD). The Framingham Heart Study was a landmark long term prospective study of cardiovascular disease among a population of free living subjects in the community of Framingham, Massachusetts, and identified effects of risk factors[@DAgostino2008]. Participants have been examined biennially since the inception of the study and all subjects are continuously followed through regular surveillance for cardiovascular outcomes. The Framingham data has been used to create models for predicting cardiovascular risk given risk factors and markers of disease, such as blood pressure, blood chemistry, lung function, smoking history, health behaviors, diagnoses of diabetes, and medication use[@DAgostino2008]. From published scholar's work, the sex-specific multivariable risk factor algorithm was created to assess and predict CVD risk. The study sample consisted of attendees of the baseline examinations free of prevalent CVD who were 30 to 74 years of age with non-missing data on covariates[@DAgostino2008]. Following this work's reference, after exclusions, 2438 participants (mean age, 59 years; 1380 women) remained eligible.
+
+In Table 1, the risk factor characteristics of men and women in our sample at the baseline examinations are significantly different at the type-I error of 0.05. In our middle-aged sample, mean levels of systolic blood pressure and the prevalences of diabetes were similar in men and women. The prevalences of cigarette smoking and use of Anti-hypertensive medication were substantially higher in women. Then we created two new variables `SYSBP_UT` and `SYSBP_T` to get systolic blood pressure based on whether participants took medication or not. As we're not interested in measurement of hazard rates, we would like to remove censored data by examining risk within 15 years. Aiming to mimic models presented in the published works, we splitted the sample data by sex and fitted the sex-specific models with respect to log transforms for all continuous variables and selected categorical variables `CURSMOKE` and `DIABETES` to predict the probability of cardiovascular disease taking place as follows:
+
+```{=tex}
+\begin{align*}
+\log(\frac{p}{1-p}) = \ & \beta_0 + \beta_1* \log(HDLC) + \beta_2*\log(TOTCHOL) \\
+& + \beta_3*\log(AGE) + \beta_4* \log(SYSBP\_UT + 1) \\
+& + \beta_5*\log(SYSBP\_T + 1) + \beta_6*CURSMOKE + \beta_7 *DIABETES
+\end{align*}
+```
+where `HDLC` means cholesterol, `TOTCHOL`means serum total cholesterol, and `SYSBP` represents systolic blood pressure.
+
+```{r}
+data("framingham")
+
+# The Framingham data has been used to create models for cardiovascular risk.
+# The variable selection and model below are designed to mimic the models used
+# in the paper General Cardiovascular Risk Profile for Use in Primary Care 
+# This paper is available (cvd_risk_profile.pdf) on Canvas.
+
+framingham_df <- framingham %>% dplyr::select(c(CVD, TIMECVD, SEX, TOTCHOL, AGE,
+                                      SYSBP, CURSMOKE, DIABETES, BPMEDS,
+                                      HDLC, BMI))
+framingham_df <- na.omit(framingham_df)
+framingham_df <- framingham_df %>% filter(AGE >= 30 & AGE <= 74)
+
+# factorize all categorical variables
+framingham_df$SEX <- as.factor(framingham_df$SEX)
+framingham_df$CURSMOKE <- as.factor(framingham_df$CURSMOKE)
+framingham_df$BPMEDS <- as.factor(framingham_df$BPMEDS)
+framingham_df$DIABETES <- as.factor(framingham_df$DIABETES)
+
+#kable
+kableone(CreateTableOne(data=framingham_df, strata = c("SEX"), test = T), 
+         caption = "Characteristics of Risk Factors Stratified by SEX in the Framingham Data",
+         align = "c", booktabs = T, longtable = T,
+         col.names = c("Men(1)", "Women(2)", "P-values", "")) %>% 
+  kable_styling(latex_options = c('HOLD_position', 'striped')) 
+
+# Get blood pressure based on whether or not on BPMEDS
+framingham_df$SYSBP_UT <- ifelse(framingham_df$BPMEDS == 0, 
+                                 framingham_df$SYSBP, 0)
+framingham_df$SYSBP_T <- ifelse(framingham_df$BPMEDS == 1, 
+                                framingham_df$SYSBP, 0)
+
+# Looking at risk within 15 years - remove censored data
+# dim(framingham_df)
+framingham_df <- framingham_df %>%
+  filter(!(CVD == 0 & TIMECVD <= 365*15)) %>%
+ dplyr:: select(-c(TIMECVD))
+# dim(framingham_df)
+
+# Filter to each sex
+framingham_df_men <- framingham_df %>% filter(SEX == 1)
+framingham_df_women <- framingham_df %>% filter(SEX == 2)
+
+# Fit models with log transforms for all continuous variables
+mod_men <- glm(CVD~log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                 log(SYSBP_T+1)+CURSMOKE+DIABETES, 
+      data= framingham_df_men, family= "binomial")
+
+
+mod_women <- glm(CVD~log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                   log(SYSBP_T+1)+CURSMOKE+DIABETES, 
+               data= framingham_df_women, family= "binomial")
+
+
+```
+
+## The National Health and Nutrition Examination Survey (NHANES)
+
+Considering the Framingham data as the source population, we use the NHANES data from 2017-2018 [@nhanes2017-2018] with the same covariates as the target population. We select variables including systolic blood pressure `BPXSY1`, gender `RIAGENDR`, age `RIDAGEYR`, Body Mass Index `BMXBMI`, cigarette smoking `SMQ040`/`SMQ020`, serum total cholesterol `LBXTC`, HDL cholesterol `LBXHDD`, diabetes `DIQ010`, and use of Anti-hypertensive medication `BPQ020`/`BPQ040A`/`BPQ050A`. The we followed the same step proceeded in the source population to add two variables about systolic blood pressure with medication treatment or not, and to filter ages ranging from 30 to 74. After exclusions, 3189 participants (mean age, 52 years; 1632 women) remained eligible. In Table 2, mean levels of serum total cholesterol and HDL cholesterol in the target population at the baseline examinations were significantly higher in women. In our middle-aged sample, the prevalences of diabetes and cigarettes smoking, as well as mean levels of systolic blood pressure, were substantially higher in men.
+
+```{r}
+# The NHANES data here finds the same covariates among this national survey data
+library(nhanesA)
+
+# blood pressure, demographic, bmi, smoking, and hypertension info
+bpx_2017 <- nhanes("BPX_J") %>% 
+  dplyr::select(SEQN, BPXSY1 ) %>% 
+  rename(SYSBP = BPXSY1)
+demo_2017 <- nhanes("DEMO_J") %>% 
+  dplyr::select(SEQN, RIAGENDR, RIDAGEYR) %>% 
+  rename(SEX = RIAGENDR, AGE = RIDAGEYR)
+bmx_2017 <- nhanes("BMX_J") %>% 
+  dplyr::select(SEQN, BMXBMI) %>% 
+  rename(BMI = BMXBMI)
+smq_2017 <- nhanes("SMQ_J") %>%
+  mutate(CURSMOKE = case_when(SMQ040 %in% c(1,2) ~ 1,
+                              SMQ040 == 3 ~ 0, 
+                              SMQ020 == 2 ~ 0)) %>%
+  dplyr::select(SEQN, CURSMOKE)
+bpq_2017 <- nhanes("BPQ_J") %>% 
+  mutate(BPMEDS = case_when(
+    BPQ020 == 2 ~ 0,
+    BPQ040A == 2 ~ 0,
+    BPQ050A == 1 ~ 1,
+    TRUE ~ NA )) %>%
+  dplyr::select(SEQN, BPMEDS) 
+tchol_2017 <- nhanes("TCHOL_J") %>% 
+  dplyr::select(SEQN, LBXTC) %>% 
+  rename(TOTCHOL = LBXTC)
+hdl_2017 <- nhanes("HDL_J") %>% 
+  dplyr::select(SEQN, LBDHDD) %>% 
+  rename(HDLC = LBDHDD)
+diq_2017 <- nhanes("DIQ_J") %>% 
+  mutate(DIABETES = case_when(DIQ010 == 1 ~ 1, 
+                              DIQ010 %in% c(2,3) ~ 0, 
+                              TRUE ~ NA)) %>%
+  dplyr::select(SEQN, DIABETES) 
+
+# Join data from different tables
+df_2017 <- bpx_2017 %>%
+  full_join(demo_2017, by = "SEQN") %>%
+  full_join(bmx_2017, by = "SEQN") %>%
+  full_join(hdl_2017, by = "SEQN") %>%
+  full_join(smq_2017, by = "SEQN") %>%
+  full_join(bpq_2017, by = "SEQN") %>%
+  full_join(tchol_2017, by = "SEQN") %>%
+  full_join(diq_2017, by = "SEQN")
+
+df_2017 <- df_2017 %>% 
+  filter(AGE >= 30 & AGE <= 74) %>% 
+  mutate(SYSBP_UT = ifelse(BPMEDS == 0, SYSBP, 0),
+         SYSBP_T = ifelse(BPMEDS == 1, SYSBP, 0))
+
+# factorize
+df_2017$SEX <- as.factor(df_2017$SEX)
+df_2017$CURSMOKE <- as.factor(df_2017$CURSMOKE)
+df_2017$BPMEDS <- as.factor(df_2017$BPMEDS)
+df_2017$DIABETES <- as.factor(df_2017$DIABETES)
+
+df_2017 <- df_2017[!is.na(df_2017$SYSBP) & !is.na(df_2017$HDLC) & !is.na(df_2017$TOTCHOL) & !is.na(df_2017$BMI),]
+
+df_2017 <- df_2017 %>% dplyr::select(-'SEQN')
+
+#kable
+kableone(CreateTableOne(data = df_2017, strata = c("SEX")), 
+         caption = "Characteristics of Risk Factors Stratified by SEX in the NHANES Data",
+         align = "c", booktabs = T, longtable = T,
+         col.names = c("Men(1)", "Women(2)", "P-values", "")) %>%  
+  kable_styling(latex_options = c('HOLD_position', 'striped')) 
+```
+
+We exclude some participants with missingness in cholesterol-related variables, BMI, and blood pressures. After omitting those missing values, we have 6% of missingness in `BPMEDS` and only 1 record missing in `DIABETES`. Then we applied multiple imputation technique to infer those missing values with 5 imputation datasets. This method is trying to handle with each missing entry by estimating multiple reliable values such as regression models, running analysis across those completed dataset, aggregating all previous analyses results and analyzing how far they spread out in terms of standard deviations and confidence intervals.
+
+# Transportability Analysis
+
+We assume that outcome and covariate information is obtained from a simple random sample from the source population (the Framingham data, $S=1$). Furthermore, covariate information is obtained from a simple random sample from the target population (the NHANES data in 2017, $S = 0$), and no outcome information is collected from the target population. We assume the following identifiability conditions: (1) independence of the outcome and the population S conditioning on covariates $X$; (2) the probability of being from the source population conditioning on covariates must be greater than 0 for every $x$ with positive density in the target population[@Steingrimsson2022]. These tow fairly strong conditions will allow us to tailor the prediction model and assess its performance in the target population. Given 5 complete imputation datasets from the NHANES data and complete cases from the Framingham data, we will split each of them into training and test sets. To tailor the prediction model $g_{\hat{\beta}}(X)$ for use in the target population, we assume the model $g_{\beta}(X)$ is misspecified in most practical application cases. Then we estimate $\beta$ using the weighted maximum likelihood estimator, which can be obtained from the inverse-odds weights of being from the source population. Although the inverse-odds weights are not identifiable, we assume, up to unknown proportionally constant, they are equal to the inverse-odds weights in the training set $\frac{Pr(S = 0)|X, D_{\text{train}} = 1}{Pr(S = 1)|X, D_{\text{train}} = 1}$[@Steingrimsson2022].
+
+```{r}
+# check missingness percentage
+# sapply(df_2017, function(x) sum(is.na(x))/nrow(df_2017))
+
+# mice imputation
+set.seed(1)
+df_2017_mice_out <- mice(df_2017, m = 5, print = FALSE, seed = 2550)
+df_2017_imp <- vector("list",5)    
+for (i in 1:5){
+  df_2017_imp[[i]] <- mice::complete(df_2017_mice_out,i)
+}
+```
+
+```{r}
+#make this example reproducible
+set.seed(2550)
+
+#use 80% of dataset as training set and 20% as test set
+sample_framingham_men <- sample(c(TRUE, FALSE), nrow(framingham_df_men), replace=TRUE, prob=c(0.8,0.2))
+framingham_df_men_train  <- framingham_df_men[sample_framingham_men, ]
+framingham_df_men_test   <- framingham_df_men[!sample_framingham_men, ]
+
+
+sample_framingham_women <- sample(c(TRUE, FALSE), nrow(framingham_df_women), replace=TRUE, prob=c(0.8,0.2))
+framingham_df_women_train  <- framingham_df_women[sample_framingham_women, ]
+framingham_df_women_test   <- framingham_df_women[!sample_framingham_women, ]
+
+mod_men_train <- glm(CVD~log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+log(SYSBP_T+1)+CURSMOKE+DIABETES, 
+      data= framingham_df_men_train, family= "binomial")
+mod_women_train <- glm(CVD~log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+log(SYSBP_T+1)+CURSMOKE+DIABETES, 
+               data= framingham_df_women_train, family= "binomial")
+
+pred_men_test <- predict(mod_men_train, newdata = framingham_df_men_test%>%dplyr::select(-'CVD'), type = "response")
+pred_women_test <- predict(mod_women_train, newdata = framingham_df_women_test%>%dplyr::select(-'CVD'), type = "response")
+
+brier_score_framingham_men <- mean((pred_men_test-framingham_df_men_test$CVD)^2)
+brier_score_framingham_women <- mean((pred_women_test-framingham_df_women_test$CVD)^2)
+
+df_2017_imp_men <- vector("list", 5)
+df_2017_imp_women <- vector("list", 5)
+for (i in 1:5){
+  df_2017_imp_men[[i]] <- df_2017_imp[[i]] %>% filter(SEX == 1) %>% mutate(S = 0)
+  df_2017_imp_women[[i]] <- df_2017_imp[[i]] %>% filter(SEX == 2) %>% mutate(S = 0)
+}
+
+df_2017_imp_men_train <- vector("list", 5)
+df_2017_imp_men_test <- vector("list", 5)
+df_2017_imp_women_train <- vector("list", 5)
+df_2017_imp_women_test <- vector("list", 5)
+for (i in 1:5){
+  sample_df_2017_men <- sample(c(TRUE, FALSE), nrow(df_2017_imp_men[[i]]), replace=TRUE, prob=c(0.8,0.2))
+  sample_df_2017_women <- sample(c(TRUE, FALSE), nrow(df_2017_imp_women[[i]]), replace=TRUE, prob=c(0.8,0.2))
+  df_2017_imp_men_train[[i]] <- df_2017_imp_men[[i]][sample_df_2017_men, ]
+  df_2017_imp_men_test[[i]] <-  df_2017_imp_men[[i]][!sample_df_2017_men, ]
+  df_2017_imp_women_train[[i]] <- df_2017_imp_women[[i]][sample_df_2017_women, ]
+  df_2017_imp_women_test[[i]] <- df_2017_imp_women[[i]][!sample_df_2017_women, ]
+}
+```
+
+Specifically, we will use 80% of the sex-specific Framingham dataset as training set and 20% as test set, as well as sex-specific imputation datasets. Following the above inverse-odds weights in the training dataset, we firstly combine training set from the Framingham and from each of training imputed 2017-NHANES sets under women and men categories separately, and then fit the logistic model with respect to the population $S$ given covariates mentioned above to get the inverse odds of being from the source population. Since this estimator for the inverse-odds weights is only applicable in the source population, we use the `predict()` function on the training Framingham dataset and take the inverse of exponentiation of predicted outcomes. We tailored the prediction model by adding weights in the `glm()` function with respect to `CVD` and refit the model again to obtain the new estimated $\beta$ coefficients. Given the tailored prediction model, we plugged into the Framingham test sets and set a threshold of 0.5 to cutoff the binary outcome 0 and 1. To get $\hat{\sigma}(X)$ of the inverse-odds weights in the test set $\frac{Pr(S = 0)|X, D_{\text{test}} = 1}{Pr(S = 1)|X, D_{\text{test}} = 1}$, we exponent results from the `predict()` function to the test Framingham data and calculate inverse. Given all those quantities, we estimate the Brier risk scores in the target population following the equation: $\hat{\psi}_{\beta} = \frac{\sum_{i=1}^{n} I(S_i = 1, D_{\text{test},i} = 1) \hat{\sigma}(X_i) (Y_i- g_{\hat{\beta}}(X_i))^2 }{\sum_{i=1}^{n} I(S_i= 0, D_{\text{test},i} = 1)}$.
+
+```{r}
+## Men
+framingham_df_men_train <- framingham_df_men_train %>% mutate(S=1)
+framingham_df_men_test <- framingham_df_men_test %>% mutate(S=1)
+framingham_df_women_train <- framingham_df_women_train %>% mutate(S=1)
+framingham_df_women_test <- framingham_df_women_test %>% mutate(S=1)
+
+combined_train_men <- vector("list", 5)
+combined_train_women <- vector("list", 5)
+
+for (i in 1:5){
+  combined_train_men[[i]] <- rbind(framingham_df_men_train[,-framingham_df_men_train$CVD], df_2017_imp_men_train[[i]])
+  combined_train_women[[i]] <- rbind(framingham_df_women_train[,-framingham_df_women_train$CVD], df_2017_imp_women_train[[i]])
+}
+
+# combined_train_test <- rbind(framingham_df_men_test[,-framingham_df_men_test$CVD], df_2017_imp_men_test[[1]])
+
+# weights 
+logit_weights_men <- vector("list", 5)
+inverse_weights_train_men <- vector("list", 5)
+logit_outcome_train_men <- vector("list", 5)
+g_X_men <- vector("list", 5)
+pred_weights_men <- vector("list", 5)
+inverse_weights_test_men <- vector("list", 5)
+brier_score_df_men <- vector("list", 5)
+brier_score_men <- vector("list", 5)
+
+for (i in 1:5){
+  logit_weights_men[[i]] <- glm(S ~ log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                 log(SYSBP_T+1)+CURSMOKE+DIABETES, data= combined_train_men[[i]], family= "binomial")
+  inverse_weights_train_men[[i]] <- 1/(exp(predict(logit_weights_men[[i]], 
+                                                   newdata = framingham_df_men_train)))
+  logit_outcome_train_men[[i]] <- glm(CVD ~ log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                   log(SYSBP_T+1)+CURSMOKE+DIABETES, 
+               data= framingham_df_men_train, 
+               weights = inverse_weights_train_men[[i]], family= "binomial")
+  # Brier Risk
+  g_X_men[[i]] <- ifelse(predict(logit_outcome_train_men[[i]], 
+                        newdata = framingham_df_men_test, type = "response") > 0.5, 1, 0)
+  pred_weights_men[[i]] <- predict(logit_weights_men[[i]], newdata=framingham_df_men_test %>% dplyr::select(-'CVD'))
+  inverse_weights_test_men[[i]] <- 1/(exp(pred_weights_men[[i]]))
+  brier_score_df_men[[i]] <- data.frame(CVD = framingham_df_men_test$CVD, g_X = g_X_men[[i]], inverse_weights_test_men =inverse_weights_test_men[[i]]) 
+  brier_score_df_men[[i]]$numerator <- (brier_score_df_men[[i]]$CVD
+                                        -brier_score_df_men[[i]]$g_X)^2*brier_score_df_men[[i]]$inverse_weights_test_men
+  brier_score_men[[i]] <- sum(brier_score_df_men[[i]]$numerator)/nrow(df_2017_imp_men_test[[i]])
+}
+brier_score_men_avg <- mean(unlist(brier_score_men))
+```
+
+```{r}
+combined_train_women_1 <- rbind(framingham_df_women_train[,-framingham_df_women_train$CVD], df_2017_imp_women_train[[1]])
+# weights 
+logit_weights_1 <- glm(S ~ log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                 log(SYSBP_T+1)+CURSMOKE+DIABETES, data= combined_train_women_1, family= "binomial")
+
+inverse_weights_train_1 <- 1/(exp(predict(logit_weights_1, newdata = framingham_df_women_train)))
+# tailored model
+logit_outcome_train_1 <- glm(CVD ~ log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                   log(SYSBP_T+1)+CURSMOKE+DIABETES, 
+               data= framingham_df_women_train, weights = inverse_weights_train_1, family= "binomial")
+# Brier Risk
+g_X_1 <- ifelse(predict(logit_outcome_train_1, newdata = framingham_df_women_test, type = "response")>0.5, 1, 0)
+pred_weights_1 <- predict(logit_weights_1, newdata=framingham_df_women_test %>% dplyr::select(-'CVD'))
+inverse_weights_test_1 <- 1/(exp(pred_weights_1))
+
+brier_score_df_1 <- data.frame(CVD = framingham_df_women_test$CVD, g_X = g_X_1, inverse_weights_test =inverse_weights_test_1) 
+brier_score_df_1$numerator <- (brier_score_df_1$CVD-brier_score_df_1$g_X)^2*inverse_weights_test_1
+brier_score_1 <- sum(brier_score_df_1$numerator)/nrow(df_2017_imp_women_test[[1]])
+```
+
+```{r}
+combined_train_women_2 <- rbind(framingham_df_women_train[,-framingham_df_women_train$CVD], df_2017_imp_women_train[[2]])
+# weights 
+logit_weights_2 <- glm(S ~ log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                 log(SYSBP_T+1)+CURSMOKE+DIABETES, data= combined_train_women_2, family= "binomial")
+
+inverse_weights_train_2 <- 1/(exp(predict(logit_weights_2, newdata = framingham_df_women_train)))
+# tailored model
+logit_outcome_train_2 <- glm(CVD ~ log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                   log(SYSBP_T+1)+CURSMOKE+DIABETES, 
+               data= framingham_df_women_train, weights = inverse_weights_train_2, family= "binomial")
+# Brier Risk
+g_X_2 <- ifelse(predict(logit_outcome_train_2, newdata = framingham_df_women_test, type = "response")>0.5, 1, 0)
+pred_weights_2 <- predict(logit_weights_2, newdata=framingham_df_women_test %>% dplyr::select(-'CVD'))
+inverse_weights_test_2 <- 1/(exp(pred_weights_2))
+
+brier_score_df_2 <- data.frame(CVD = framingham_df_women_test$CVD, g_X = g_X_2, inverse_weights_test =inverse_weights_test_2) 
+brier_score_df_2$numerator <- (brier_score_df_2$CVD-brier_score_df_2$g_X)^2*inverse_weights_test_2
+brier_score_2 <- sum(brier_score_df_2$numerator)/nrow(df_2017_imp_women_test[[2]])
+```
+
+```{r}
+combined_train_women_3 <- rbind(framingham_df_women_train[,-framingham_df_women_train$CVD], df_2017_imp_women_train[[3]])
+# weights 
+logit_weights_3 <- glm(S ~ log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                 log(SYSBP_T+1)+CURSMOKE+DIABETES, data= combined_train_women_3, family= "binomial")
+
+inverse_weights_train_3 <- 1/(exp(predict(logit_weights_3, newdata = framingham_df_women_train)))
+# tailored model
+logit_outcome_train_3 <- glm(CVD ~ log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                   log(SYSBP_T+1)+CURSMOKE+DIABETES, 
+               data= framingham_df_women_train, weights = inverse_weights_train_3, family= "binomial")
+# Brier Risk
+g_X_3 <- ifelse(predict(logit_outcome_train_3, newdata = framingham_df_women_test, type = "response")>0.5, 1, 0)
+pred_weights_3 <- predict(logit_weights_3, newdata=framingham_df_women_test %>% dplyr::select(-'CVD'))
+inverse_weights_test_3 <- 1/(exp(pred_weights_3))
+
+brier_score_df_3 <- data.frame(CVD = framingham_df_women_test$CVD, g_X = g_X_3, inverse_weights_test =inverse_weights_test_3) 
+brier_score_df_3$numerator <- (brier_score_df_3$CVD-brier_score_df_3$g_X)^2*inverse_weights_test_3
+brier_score_3 <- sum(brier_score_df_3$numerator)/nrow(df_2017_imp_women_test[[3]])
+```
+
+```{r}
+combined_train_women_4 <- rbind(framingham_df_women_train[,-framingham_df_women_train$CVD], df_2017_imp_women_train[[4]])
+# weights 
+logit_weights_4 <- glm(S ~ log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                 log(SYSBP_T+1)+CURSMOKE+DIABETES, data= combined_train_women_4, family= "binomial")
+
+inverse_weights_train_4 <- 1/(exp(predict(logit_weights_4, newdata = framingham_df_women_train)))
+# tailored model
+logit_outcome_train_4 <- glm(CVD ~ log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                   log(SYSBP_T+1)+CURSMOKE+DIABETES, 
+               data= framingham_df_women_train, weights = inverse_weights_train_4, family= "binomial")
+# Brier Risk
+g_X_4 <- ifelse(predict(logit_outcome_train_4, newdata = framingham_df_women_test, type = "response")>0.5, 1, 0)
+pred_weights_4 <- predict(logit_weights_4, newdata=framingham_df_women_test %>% dplyr::select(-'CVD'))
+inverse_weights_test_4 <- 1/(exp(pred_weights_4))
+
+brier_score_df_4 <- data.frame(CVD = framingham_df_women_test$CVD, g_X = g_X_4, inverse_weights_test =inverse_weights_test_4) 
+brier_score_df_4$numerator <- (brier_score_df_4$CVD-brier_score_df_4$g_X)^2*inverse_weights_test_4
+brier_score_4 <- sum(brier_score_df_4$numerator)/nrow(df_2017_imp_women_test[[4]])
+```
+
+```{r}
+combined_train_women_5 <- rbind(framingham_df_women_train[,-framingham_df_women_train$CVD], df_2017_imp_women_train[[5]])
+# weights 
+logit_weights_5 <- glm(S ~ log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                 log(SYSBP_T+1)+CURSMOKE+DIABETES, data= combined_train_women_5, family= "binomial")
+
+inverse_weights_train_5 <- 1/(exp(predict(logit_weights_5, newdata = framingham_df_women_train)))
+# tailored model
+logit_outcome_train_5 <- glm(CVD ~ log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                   log(SYSBP_T+1)+CURSMOKE+DIABETES, 
+               data= framingham_df_women_train, weights = inverse_weights_train_5, family= "binomial")
+# Brier Risk
+g_X_5 <- ifelse(predict(logit_outcome_train_5, newdata = framingham_df_women_test, type = "response")>0.5, 1, 0)
+pred_weights_5 <- predict(logit_weights_5, newdata=framingham_df_women_test %>% dplyr::select(-'CVD'))
+inverse_weights_test_5 <- 1/(exp(pred_weights_5))
+
+brier_score_df_5 <- data.frame(CVD = framingham_df_women_test$CVD, g_X = g_X_5, inverse_weights_test =inverse_weights_test_5) 
+brier_score_df_5$numerator <- (brier_score_df_5$CVD-brier_score_df_5$g_X)^2*inverse_weights_test_5
+brier_score_5 <- sum(brier_score_df_5$numerator)/nrow(df_2017_imp_women_test[[5]])
+```
+
+```{r}
+brier_score_women <- mean(brier_score_1, brier_score_2, brier_score_3, brier_score_4, brier_score_5)
+```
+
+```{r, echo=FALSE, eval=FALSE}
+# weights 
+logit_weights_women <- vector("list", 5)
+inverse_weights_train_women <- vector("list", 5)
+logit_outcome_train_women <- vector("list", 5)
+g_X_women <- vector("list", 5)
+pred_weights_women <- vector("list", 5)
+inverse_weights_test_women <- vector("list", 5)
+brier_score_df_women <- vector("list", 5)
+brier_score_women <- vector("list", 5)
+
+for (i in 1:5){
+  logit_weights_women[[i]] <- glm(S ~ log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                 log(SYSBP_T+1)+CURSMOKE+DIABETES, data= combined_train_women[[i]], family= "binomial")
+  inverse_weights_train_women[[i]] <- 1/(exp(predict(logit_weights_women[[i]], 
+                                                   newdata = framingham_df_women_train)))
+  logit_outcome_train_women[[i]] <- glm(CVD ~ log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                   log(SYSBP_T+1)+CURSMOKE+DIABETES, 
+               data= framingham_df_women_train, 
+               weights = inverse_weights_train_women[[i]], family= "binomial")
+  # Brier Risk
+  g_X_women[[i]] <- ifelse(predict(logit_outcome_train_women[[i]], 
+                        newdata = framingham_df_women_test, type = "response") > 0.5, 1, 0)
+  pred_weights_women[[i]] <- predict(logit_weights_women[[i]], newdata=framingham_df_women_test %>% dplyr::select(-'CVD'))
+  inverse_weights_test_women[[i]] <- 1/(exp(pred_weights_women[[i]]))
+  brier_score_df_women[[i]] <- data.frame(CVD = framingham_df_women_test$CVD, g_X = g_X_women[[i]], inverse_weights_test_women = inverse_weights_test_women[[i]]) 
+  brier_score_df_women[[i]]$numerator <- (brier_score_df_women[[i]]$CVD
+                                        -brier_score_df_women[[i]]$g_X)^2*brier_score_df_women[[i]]$inverse_weights_test_women
+  brier_score_df_women[[i]] <- sum(brier_score_df_women[[i]]$numerator)/nrow(df_2017_imp_women_test[[i]])
+}
+brier_score_women
+mean(unlist(brier_score_women))
+```
+
+```{r}
+brier_score_table <- data.frame(Men = c(brier_score_men[[1]], brier_score_men[[2]], brier_score_men[[3]], brier_score_men[[4]], brier_score_men[[5]], brier_score_men_avg), Women  = c(brier_score_1, brier_score_2, brier_score_3, brier_score_4, brier_score_5, brier_score_women))
+rownames(brier_score_table) <- c("Composite Fram and Imp 1 Test", 
+                                 "Composite Fram and Imp 2 Test", "Composite Fram and Imp 3 Test", "Composite Fram and Imp 4 Test", "Composite Fram and Imp 5 Test", "Average Estimation for Brier Risk")
+colnames(brier_score_table) <- c("Men", "Women")
+brier_score_table %>% round(4) %>% 
+  kable(
+        caption = "Estimated Brier Scores in the Target Population",
+        align = "c",
+        booktabs = T) %>% 
+  kable_styling(latex_options = c('HOLD_position', 'striped')) %>%
+  row_spec(6, bold = T)
+```
+
+Our findings are relevant to scenarios where prediction models are constructed using training data and subsequently assessed using test data. In these cases, the composite dataset is divided into separate training and test sets to facilitate model development and evaluation. Brier scores, which range from 0 to 1, serve as a measure of predictive accuracy, with 0 denoting perfect accuracy and 1 indicating perfect inaccuracy. Our results reveal that the estimated Brier scores for the NHANES target population closely approach 0 when stratified by gender. Notably, these scores surpass the true scores of 0.1909 for males and 0.1009 for females observed in the source population. This underscores the impressive performance of our customized prediction model in the context of transportability analysis, particularly within the female subgroup.
+
+# Simulation Studies
+
+Now we assume that individual level data is not available from the target population and only summary statistics with mean and standard deviation derived from the NHANES dataset are available.
+
+**Aim:** The simulation study focused on investigating how estimation for the Brier score could be influenced in the simulated target population under different data generation processes for covariates, and examining the number of simulations that could vary estimates.
+
+**Data Generation Mechanism:**
+-   We took log transformation for each continuous variable in the source population to ensure normality and got correlation matrix. Then we simulated 3000 observations from a multivariate normal distribution with defined mean and standard deviation values derived from the NHANES-2017 data. As for categorical variables, we fitted logistic models to determine the potential correlations between categorical variables and existing simulated variables. 
+
+-   We determined the distributions of continuous variables and simulated new individual-level data under certain parameter settings by using    `descdist()` function with bootstrapping method and `fitdistr()` function for parameters; Given simulated variables, we still fitted logistic models for categorical variables to understand the association between specified categorical variables and other
+generated covariates. 
+
+-   We explored a different distribution of `Age`, a normal distribution, other than the uniform
+distribution defined in the second data generation method. Then we followed the same procedure of logistic models implemented in the second data generation mechanism to simulate categorical covariates. 
+
+**Methods:** The estimands are described in the estimator for Brier risk in the section of transportability analysis.
+
+**Methods:** We split the dataset into training and test sets and applied two sex-specific
+logistic regression models. Following the inverse-odds weights in the training dataset, we tailored the prediction model to obtain new estimated coefficients and plugged into the test sets to estimate the Brier scores.
+
+**Performance Measures:** We assessed the average and standard deviation of Brier scores across different numbers of simulations from 1 to 2000, under each simulation case and conducted a direct comparison between the estimations and the original Brier
+scores from the NHANES-2017 dataset.
+
+The shared parameter is the number of samples to generate (N = 3000) and significance level of 0.05. As for the first data generation method, we took log transformation for each continuous variable to ensure the normality and tested the correlation matrix. Given fixed mean and standard deviation derived from the NHANES data, we simulated from a multivariate normal distribution with defined mean vector and covariance matrix of the continuous variables with the consideration of standard deviation. Except for continuous variable, we also considered about potential correlation between categorical variables, such as use of medication, and continuous variables, such as systolic blood pressure. To get the sense of association, we fitted the logistic model to determine if variables are highly associated with binary outcomes in the Framingham dataset. The first binary variable we examined is `BPMEDS`. The p-value showed that systolic blood pressure plays an important role in predicting the odds of use of medications, thus, we predicted `BPMEDS` in the simulated target population given the logistic regression model with respect to `BPMEDS` given important continuous predictors in the source population. The second categorical variable is `SEX`. We fitted the model with respect to simulated log-transformation of `BMI`, `HDLC`, and `TOTCHOL` and `BPMEDS` to predict the gender category. The third covariate to simulate is `CURSMOKE` given the logistic model including log of `BMI`, log of `AGE` and `SEX` as predictors. The last categorical variable is `DIABETES`. From the insight of important variables correlated to diagnoses of diabetes in the source population, we fitted the logistic model with predictors of systolic blood pressure, age and BMI levels. By continually fitting logistic regression models in terms of categorical covariates, we get primary ideas about potential associations between categorical and continuous variables and simulate  binary covariates based on estimated coefficients of significant predictors.
+
+```{r}
+set.seed(123)
+# log continuous variable in framham
+framingham_df$logAGE <- log(framingham_df$AGE)
+framingham_df$logTOTCHOL <- log(framingham_df$TOTCHOL)
+framingham_df$logSYSBP <- log(framingham_df$SYSBP)
+framingham_df$logHDLC <- log(framingham_df$HDLC)
+framingham_df$logBMI <- log(framingham_df$BMI)
+log_contin_df <- data.frame(logTOTCHOL = log(framingham_df$TOTCHOL),
+                            logHDLC = log(framingham_df$HDLC),
+                            logBMI = log(framingham_df$BMI),
+                            logSYSBP = log(framingham_df$SYSBP),
+                            logAGE = log(framingham_df$AGE))
+cor_mat_fram <- cor(log_contin_df)
+
+# number of samples to generate
+n_samples <- 3000
+
+# mean and sd vectors 
+means_cont <- c(192.66, 52.89, 30.32, 126.74, 52.41)
+sd_cont <- c(41.26, 15.86, 7.33, 18.63, 12.60)
+
+```
+
+```{r}
+simulate_data_case_I <- function(){
+  # generate continuous random samples
+  simulate_data_1 <- mvrnorm(n_samples, mu = means_cont, Sigma = diag(sd_cont) %*%
+                               cor_mat_fram %*% diag(sd_cont))
+  # sd(as.data.frame(simulate_data_1)$V2)
+  simulate_data_1 <- as.data.frame(simulate_data_1)
+  colnames(simulate_data_1) <- c("TOTCHOL", "HDLC", "BMI", "SYSBP", "AGE")
+  simulate_data_log_1 <- log(simulate_data_1)
+  colnames(simulate_data_log_1) <- c("logTOTCHOL", "logHDLC", "logBMI", "logSYSBP", "logAGE")
+
+  # generate categorical random samples
+  
+  ## BPMEDS
+  simulate_data_1$BPMEDS <- ifelse(predict(glm(BPMEDS ~ logSYSBP, data = framingham_df, family = "binomial"),type = "response", newdata = simulate_data_log_1)>0.5, 1,0)
+  simulate_data_log_1$BPMEDS <- simulate_data_1$BPMEDS
+  
+  ## SEX
+  simulate_data_1$SEX <- ifelse(predict(glm(SEX ~ logBMI+logHDLC+logTOTCHOL+(as.numeric(BPMEDS)), data = framingham_df, family = "binomial"),type = "response", newdata = simulate_data_log_1)>0.5, 1,0)
+  simulate_data_1$SEX <- simulate_data_1$SEX+1
+  simulate_data_log_1$SEX <- simulate_data_1$SEX
+  
+  ## CURSMOKE
+  simulate_data_1$CURSMOKE <- ifelse(predict(glm(CURSMOKE ~ logBMI+logAGE+as.numeric(SEX), data = framingham_df, family = "binomial"),type = "response", newdata = simulate_data_log_1)>0.5, 1,0)
+  simulate_data_log_1$CURSMOKE <- simulate_data_1$CURSMOKE
+  
+  ## DIABETES
+  simulate_data_1$DIABETES <- ifelse(predict(glm(DIABETES ~ logSYSBP+logAGE+logBMI, data = framingham_df, family = "binomial"),type = "response", newdata = simulate_data_log_1)>0.5, 1,0)
+  simulate_data_log_1$DIABETES <- simulate_data_1$DIABETES
+  
+  # filter and combine dataset 
+  simulate_data_1 <- simulate_data_1 %>%  filter(AGE >= 30 & AGE <= 74) %>% 
+  mutate(SYSBP_UT = ifelse(BPMEDS == 0, SYSBP, 0),
+         SYSBP_T = ifelse(BPMEDS == 1, SYSBP, 0))
+  
+  return(simulate_data_1)
+}
+```
+
+```{r}
+simulate_brier_score_case_I <- function(){
+  simulate_df <- simulate_data_case_I()
+  simulate_df_men <- simulate_df %>% filter(SEX == 1) %>% mutate(S = 0)
+  simulate_df_women <- simulate_df %>% filter(SEX == 2) %>% mutate(S = 0)
+  
+  sample_simulate_df_men <- sample(c(TRUE, FALSE), nrow(simulate_df_men), replace=TRUE, prob=c(0.8,0.2))
+  sample_simulate_df_women <- sample(c(TRUE, FALSE), nrow(simulate_df_women), replace=TRUE, prob=c(0.8,0.2))
+  simulate_df_men_train <- simulate_df_men[sample_simulate_df_men, ]
+  simulate_df_men_test <-  simulate_df_men[!sample_simulate_df_men, ]
+  simulate_df_women_train <- simulate_df_women[sample_simulate_df_women, ]
+  simulate_df_women_test <- simulate_df_women[!sample_simulate_df_women, ]
+  # Men
+  combined_simu_train_men <- rbind(framingham_df_men_train[,-framingham_df_men_train$CVD], simulate_df_men_train)
+# weights 
+  simu_logit_weights_men <- glm(S ~ log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                 log(SYSBP_T+1)+CURSMOKE+DIABETES, data= combined_simu_train_men, family= "binomial")
+
+  simu_inverse_weights_train_men <- 1/(exp(predict(simu_logit_weights_men, newdata = framingham_df_men_train)))
+  
+  # tailored model
+  simu_logit_outcome_train_men <- glm(CVD ~ log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                   log(SYSBP_T+1)+CURSMOKE+DIABETES, 
+               data= framingham_df_men_train, weights = simu_inverse_weights_train_men, family= "binomial")
+  # Brier Risk for men
+  g_X_simu_men <- ifelse(predict(simu_logit_outcome_train_men, newdata = framingham_df_men_test, type = "response")>0.5, 1, 0)
+  pred_weights_simu_men <- predict(simu_logit_weights_men, newdata=framingham_df_men_test %>% dplyr::select(-'CVD'))
+  inverse_weights_test_simu_men <- 1/(exp(pred_weights_simu_men))
+  brier_score_simu_men <- sum((framingham_df_men_test$CVD-g_X_simu_men)^2*inverse_weights_test_simu_men)/nrow(simulate_df_men_test)
+  
+  # Women 
+  combined_simu_train_women <- rbind(framingham_df_women_train[,-framingham_df_women_train$CVD], simulate_df_women_train)
+  # weights 
+  simu_logit_weights_women <- glm(S ~ log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                 log(SYSBP_T+1)+CURSMOKE+DIABETES, data= combined_simu_train_women, family= "binomial")
+  simu_inverse_weights_train_women <- 1/(exp(predict(simu_logit_weights_women, newdata = framingham_df_women_train)))
+  # tailored model
+  simu_logit_outcome_train_women <- glm(CVD ~ log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                   log(SYSBP_T+1)+CURSMOKE+DIABETES, 
+               data= framingham_df_women_train, weights = simu_inverse_weights_train_women, family= "binomial")
+  # Brier Risk
+  g_X_simu_women <- ifelse(predict(simu_logit_outcome_train_women, newdata = framingham_df_women_test, type = "response")>0.5, 1, 0)
+  pred_weights_simu_women <- predict(simu_logit_weights_women, newdata=framingham_df_women_test %>% dplyr::select(-'CVD'))
+  inverse_weights_test_simu_women <- 1/(exp(pred_weights_simu_women))
+  brier_simu_women <- sum((framingham_df_women_test$CVD-g_X_simu_women)^2*inverse_weights_test_simu_women)/nrow(simulate_df_women_test)
+  
+  return(c(brier_score_simu_men, brier_simu_women))
+}
+```
+
+```{r, warning=FALSE, eval=FALSE}
+# Initialize data frame to store Brier scores
+simu_case_I_brier_scores <- matrix(nrow = 2000, ncol = 2)
+# Perform 1000 simulations
+set.seed(1223)
+for(i in 1:2000) {
+  simu_case_I_brier_scores[i, ] <- simulate_brier_score_case_I()
+}
+colnames(simu_case_I_brier_scores) <- c("Men", "Women")
+```
+
+```{r}
+# saveRDS(simu_case_I_brier_scores, file = "/Users/jialinliu/Downloads/simu_case_I_brier_scores.RDS")
+simu_case_I_brier_scores <- readRDS("/Users/jialinliu/Downloads/simu_case_I_brier_scores.RDS")
+```
+
+```{r}
+# Mean
+simu_case_I_men_avg <- mean(simu_case_I_brier_scores[,1])
+simu_case_I_women_avg <- mean(simu_case_I_brier_scores[,2])
+# SD
+simu_case_I_men_sd <- sd(simu_case_I_brier_scores[,1])
+simu_case_I_women_sd <- sd(simu_case_I_brier_scores[,2])
+```
+
+In the second data generation mechanism, we focused on establishing the distributions of continuous covariates within the source population and subsequently simulated new individual-level data based on specific parameter settings. To achieve this, we employed the `descdist()` function, coupled with bootstrapping techniques, to calculate descriptive parameters for empirical distributions of non-censored data, visualizing these through skewness-kurtosis plots. For example, the Cullen and Frey graph revealed that systolic blood pressure closely adhered to a gamma distribution in the source population, as evidenced by the observed data points (in blue) closely aligning with the theoretical gamma distribution dashed line. We then utilized the `fitdistr()` function to estimate the shape and rate parameters, ultimately simulating `SYSBP` according to a gamma distribution with a shape parameter of 40.18 and a rate parameter of 0.29. Following a similar approach, we initially established theoretical distributions for each continuous variable based on Cullen and Frey graphs, subsequently using fixed mean and standard deviation values for the generation of all continuous variables. In summary, `AGE` adheres to a uniform distribution ranging from 30 to 74, while systolic blood pressure `SYSBP` follows a gamma distribution with the parameters mentioned above. `BMI` follows a log-normal distribution with a mean of 30.32 on the log scale and a standard deviation of 7.33 on the log scale, `HDLC` follows a log-normal distribution with a mean of 52.89 on the log scale and a standard deviation of 15.86 on the log scale, and `TOTCHOL` follows a log-normal distribution with a mean of 192.66 on the log scale and a standard deviation of 41.26 on the log scale. For categorical variables, we adopted a similar procedure to the one employed in the first data generation mechanism. Once again, we fitted logistic regression models to elucidate associations between pre-specified categorical variables and other vital simulated covariates. The inclusion of additional variables in our simulations resulted in increased accuracy for the generation of binary variables of interest.
+
+In the third simulation scenario, we exclusively explored an alternative distribution for AGE, which now adheres to a normal distribution with a mean of 52.41 and a standard deviation of 12.60. All other procedures remained consistent with those performed in the second case. Below, we can find correlation matrices comparing the original target population to the three simulated cases, as well as distribution plots depicting the behavior of each continuous variable under the three simulation scenarios and the true distribution derived from NHANES-2017 data.
+
+```{r, eval=FALSE}
+## continuous variable in framingham
+descdist(framingham_df$AGE, boot = 1000)
+hist(framingham_df$AGE)
+fit.norm.AGE <- fitdist(framingham_df$AGE, "norm")
+fit.unif.AGE <- fitdist(framingham_df$AGE, "unif")
+plot(fit.norm.AGE)
+shapiro.test(framingham_df$AGE)
+ks.test(framingham_df$AGE,"punif",30,74)
+par(mfrow=c(2,2))
+denscomp(list(fit.norm.AGE,fit.unif.AGE),legendtext=c("Normal","Uniform"))
+qqcomp(list(fit.norm.AGE,fit.unif.AGE),legendtext=c("Normal","Uniform"))
+cdfcomp(list(fit.norm.AGE,fit.unif.AGE),legendtext=c("Normal","Uniform"))
+ppcomp(list(fit.norm.AGE,fit.unif.AGE),legendtext=c("Normal","Uniform"))
+```
+
+```{r,eval=FALSE}
+descdist(framingham_df$SYSBP, boot = 1000)
+fitdistr(framingham_df$SYSBP, "gamma")
+
+descdist(framingham_df$BMI, boot = 1000, discrete = F)
+fit.lnorm.BMI <- fitdist(framingham_df$BMI, "lnorm")
+# plot(fit.lnorm.BMI)
+
+descdist(framingham_df$HDLC, boot = 1000)
+fit.lnorm.HDLC <- fitdist(framingham_df$HDLC, "lnorm")
+plot(fit.lnorm.HDLC)
+
+descdist(framingham_df$TOTCHOL, boot = 1000)
+fit.lnorm.TOTCHOL <- fitdist(framingham_df$TOTCHOL, "lnorm")
+plot(fit.lnorm.TOTCHOL)
+```
+
+```{r}
+simulate_data_case_II <- function(){
+  # generate continuous random samples
+  simulate_data_2 <- data.frame(SYSBP = rgamma(n = 3000, shape = 40.1881, rate = 0.2896),
+                              BMI = rlnorm(n = 3000, meanlog = log(30.32^2/sqrt(30.32^2+7.33^2)), sdlog = sqrt(log(7.33^2/30.32^2 + 1))),
+                              HDLC = rlnorm(n = 3000, meanlog = log(52.89^2/sqrt(52.89^2+15.86^2)), sdlog = sqrt(log(15.86^2/52.89^2 + 1))),
+                              TOTCHOL = rlnorm(n = 3000, meanlog = log(192.66^2/sqrt(192.66^2+41.26^2)), sdlog = sqrt(log(41.26^2/192.66^2 + 1))),
+                              AGE = rnorm(n = 3000, mean = 52.41, sd = 12.60))
+  simulate_data_log_2 <- data.frame(logSYSBP = log(simulate_data_2$SYSBP),
+                              logBMI = log(simulate_data_2$BMI),
+                              logHDLC = log(simulate_data_2$HDLC),
+                              logTOTCHOL = log(simulate_data_2$TOTCHOL),
+                              logAGE = log(simulate_data_2$AGE))
+  colnames(simulate_data_log_2) <- c("logSYSBP", "logBMI", "logHDLC", "logTOTCHOL", "logAGE")
+  # generate categorical random samples
+  
+  ## BPMEDS
+  simulate_data_2$BPMEDS <- ifelse(predict(glm(BPMEDS ~ logSYSBP, data = framingham_df, family = "binomial"),type = "response", newdata = simulate_data_log_2)>0.5, 1,0)
+  simulate_data_log_2$BPMEDS <- simulate_data_2$BPMEDS
+  
+  ## SEX
+  simulate_data_2$SEX <- ifelse(predict(glm(SEX ~ logBMI+logHDLC+logTOTCHOL+(as.numeric(BPMEDS)), data = framingham_df, family = "binomial"),type = "response", newdata = simulate_data_log_2)>0.5, 1,0)
+  simulate_data_2$SEX <- simulate_data_2$SEX+1
+  simulate_data_log_2$SEX <- simulate_data_2$SEX
+  
+  ## CURSMOKE
+  simulate_data_2$CURSMOKE <- ifelse(predict(glm(CURSMOKE ~ logBMI+logAGE+as.numeric(SEX), data = framingham_df, family = "binomial"),type = "response", newdata = simulate_data_log_2)>0.5, 1,0)
+  simulate_data_log_2$CURSMOKE <- simulate_data_2$CURSMOKE
+  
+  ## DIABETES
+  simulate_data_2$DIABETES <- ifelse(predict(glm(DIABETES ~ logSYSBP+logAGE+logBMI, data = framingham_df, family = "binomial"),type = "response", newdata = simulate_data_log_2)>0.1, 1,0)
+  simulate_data_log_2$DIABETES <- simulate_data_2$DIABETES
+  
+  # filter and combine dataset 
+  simulate_data_2 <- simulate_data_2 %>%  filter(AGE >= 30 & AGE <= 74) %>% 
+  mutate(SYSBP_UT = ifelse(BPMEDS == 0, SYSBP, 0),
+         SYSBP_T = ifelse(BPMEDS == 1, SYSBP, 0))
+  
+  return(simulate_data_2)
+}
+```
+
+```{r}
+simulate_brier_score_case_II <- function(){
+  simulate_df <- simulate_data_case_II()
+  simulate_df_men <- simulate_df %>% filter(SEX == 1) %>% mutate(S = 0)
+  simulate_df_women <- simulate_df %>% filter(SEX == 2) %>% mutate(S = 0)
+  
+  sample_simulate_df_men <- sample(c(TRUE, FALSE), nrow(simulate_df_men), replace=TRUE, prob=c(0.8,0.2))
+  sample_simulate_df_women <- sample(c(TRUE, FALSE), nrow(simulate_df_women), replace=TRUE, prob=c(0.8,0.2))
+  simulate_df_men_train <- simulate_df_men[sample_simulate_df_men, ]
+  simulate_df_men_test <-  simulate_df_men[!sample_simulate_df_men, ]
+  simulate_df_women_train <- simulate_df_women[sample_simulate_df_women, ]
+  simulate_df_women_test <- simulate_df_women[!sample_simulate_df_women, ]
+  # Men
+  combined_simu_train_men <- rbind(framingham_df_men_train[,-framingham_df_men_train$CVD], simulate_df_men_train)
+# weights 
+  simu_logit_weights_men <- glm(S ~ log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                 log(SYSBP_T+1)+CURSMOKE+DIABETES, data= combined_simu_train_men, family= "binomial")
+
+  simu_inverse_weights_train_men <- 1/(exp(predict(simu_logit_weights_men, newdata = framingham_df_men_train)))
+  
+  # tailored model
+  simu_logit_outcome_train_men <- glm(CVD ~ log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                   log(SYSBP_T+1)+CURSMOKE+DIABETES, 
+               data= framingham_df_men_train, weights = simu_inverse_weights_train_men, family= "binomial")
+  # Brier Risk for men
+  g_X_simu_men <- ifelse(predict(simu_logit_outcome_train_men, newdata = framingham_df_men_test, type = "response")>0.5, 1, 0)
+  pred_weights_simu_men <- predict(simu_logit_weights_men, newdata=framingham_df_men_test %>% dplyr::select(-'CVD'))
+  inverse_weights_test_simu_men <- 1/(exp(pred_weights_simu_men))
+  brier_score_simu_men <- sum((framingham_df_men_test$CVD-g_X_simu_men)^2*inverse_weights_test_simu_men)/nrow(simulate_df_men_test)
+  
+  # Women 
+  combined_simu_train_women <- rbind(framingham_df_women_train[,-framingham_df_women_train$CVD], simulate_df_women_train)
+  # weights 
+  simu_logit_weights_women <- glm(S ~ log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                 log(SYSBP_T+1)+CURSMOKE+DIABETES, data= combined_simu_train_women, family= "binomial")
+  simu_inverse_weights_train_women <- 1/(exp(predict(simu_logit_weights_women, newdata = framingham_df_women_train)))
+  # tailored model
+  simu_logit_outcome_train_women <- glm(CVD ~ log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                   log(SYSBP_T+1)+CURSMOKE+DIABETES, 
+               data= framingham_df_women_train, weights = simu_inverse_weights_train_women, family= "binomial")
+  # Brier Risk
+  g_X_simu_women <- ifelse(predict(simu_logit_outcome_train_women, newdata = framingham_df_women_test, type = "response")>0.5, 1, 0)
+  pred_weights_simu_women <- predict(simu_logit_weights_women, newdata=framingham_df_women_test %>% dplyr::select(-'CVD'))
+  inverse_weights_test_simu_women <- 1/(exp(pred_weights_simu_women))
+  brier_simu_women <- sum((framingham_df_women_test$CVD-g_X_simu_women)^2*inverse_weights_test_simu_women)/nrow(simulate_df_women_test)
+  
+  return(c(brier_score_simu_men, brier_simu_women))
+}
+```
+
+```{r, warning=FALSE, eval=FALSE}
+# Initialize data frame to store Brier scores
+simu_case_II_brier_scores <- matrix(nrow = 2000, ncol = 2)
+# Perform 1000 simulations
+set.seed(1223)
+for(i in 1:2000) {
+  simu_case_II_brier_scores[i, ] <- simulate_brier_score_case_II()
+}
+colnames(simu_case_II_brier_scores) <- c("Men", "Women")
+view(simu_case_II_brier_scores)
+```
+
+```{r}
+# saveRDS(simu_case_II_brier_scores, file = "/Users/jialinliu/Downloads/simu_case_II_brier_scores.RDS")
+simu_case_II_brier_scores <- readRDS("/Users/jialinliu/Downloads/simu_case_II_brier_scores.RDS")
+```
+
+```{r}
+# Mean
+simu_case_II_men_avg <- mean(simu_case_II_brier_scores[,1])
+simu_case_II_women_avg <- mean(simu_case_II_brier_scores[,2])
+# SD
+simu_case_II_men_sd <- sd(simu_case_II_brier_scores[,1])
+simu_case_II_women_sd <- sd(simu_case_II_brier_scores[,2])
+```
+
+```{r}
+simulate_data_case_III <- function(){
+  # generate continuous random samples
+  simulate_data_3 <- data.frame(SYSBP = rgamma(n = 3000, shape = 40.1881, rate = 0.2896),
+                              BMI = rlnorm(n = 3000, meanlog = log(30.32^2/sqrt(30.32^2+7.33^2)), sdlog = sqrt(log(7.33^2/30.32^2 + 1))),
+                              HDLC = rlnorm(n = 3000, meanlog = log(52.89^2/sqrt(52.89^2+15.86^2)), sdlog = sqrt(log(15.86^2/52.89^2 + 1))),
+                              TOTCHOL = rlnorm(n = 3000, meanlog = log(192.66^2/sqrt(192.66^2+41.26^2)), sdlog = sqrt(log(41.26^2/192.66^2 + 1))),
+                              AGE = runif(n = 3000, min = 30, max = 74))
+  simulate_data_log_3 <- data.frame(logSYSBP = log(simulate_data_3$SYSBP),
+                              logBMI = log(simulate_data_3$BMI),
+                              logHDLC = log(simulate_data_3$HDLC),
+                              logTOTCHOL = log(simulate_data_3$TOTCHOL),
+                              logAGE = log(simulate_data_3$AGE))
+  colnames(simulate_data_log_3) <- c("logSYSBP", "logBMI", "logHDLC", "logTOTCHOL", "logAGE")
+  # generate categorical random samples
+  
+  ## BPMEDS
+  simulate_data_3$BPMEDS <- ifelse(predict(glm(BPMEDS ~ logSYSBP, data = framingham_df, family = "binomial"),type = "response", newdata = simulate_data_log_3)>0.5, 1,0)
+  simulate_data_log_3$BPMEDS <- simulate_data_3$BPMEDS
+  
+  ## SEX
+  simulate_data_3$SEX <- ifelse(predict(glm(SEX ~ logBMI+logHDLC+logTOTCHOL+(as.numeric(BPMEDS)), data = framingham_df, family = "binomial"),type = "response", newdata = simulate_data_log_3)>0.5, 1,0)
+  simulate_data_3$SEX <- simulate_data_3$SEX+1
+  simulate_data_log_3$SEX <- simulate_data_3$SEX
+  
+  ## CURSMOKE
+  simulate_data_3$CURSMOKE <- ifelse(predict(glm(CURSMOKE ~ logBMI+logAGE+as.numeric(SEX), data = framingham_df, family = "binomial"),type = "response", newdata = simulate_data_log_3)>0.5, 1,0)
+  simulate_data_log_3$CURSMOKE <- simulate_data_3$CURSMOKE
+  
+  ## DIABETES
+  simulate_data_3$DIABETES <- ifelse(predict(glm(DIABETES ~ logSYSBP+logAGE+logBMI, data = framingham_df, family = "binomial"),type = "response", newdata = simulate_data_log_3)>0.1, 1,0)
+  simulate_data_log_3$DIABETES <- simulate_data_3$DIABETES
+  
+  # filter and combine dataset 
+  simulate_data_3 <- simulate_data_3 %>%  filter(AGE >= 30 & AGE <= 74) %>% 
+  mutate(SYSBP_UT = ifelse(BPMEDS == 0, SYSBP, 0),
+         SYSBP_T = ifelse(BPMEDS == 1, SYSBP, 0))
+  
+  return(simulate_data_3)
+}
+```
+
+```{r}
+simulate_brier_score_case_III <- function(){
+  simulate_df <- simulate_data_case_III()
+  simulate_df_men <- simulate_df %>% filter(SEX == 1) %>% mutate(S = 0)
+  simulate_df_women <- simulate_df %>% filter(SEX == 2) %>% mutate(S = 0)
+  
+  sample_simulate_df_men <- sample(c(TRUE, FALSE), nrow(simulate_df_men), replace=TRUE, prob=c(0.8,0.2))
+  sample_simulate_df_women <- sample(c(TRUE, FALSE), nrow(simulate_df_women), replace=TRUE, prob=c(0.8,0.2))
+  simulate_df_men_train <- simulate_df_men[sample_simulate_df_men, ]
+  simulate_df_men_test <-  simulate_df_men[!sample_simulate_df_men, ]
+  simulate_df_women_train <- simulate_df_women[sample_simulate_df_women, ]
+  simulate_df_women_test <- simulate_df_women[!sample_simulate_df_women, ]
+  # Men
+  combined_simu_train_men <- rbind(framingham_df_men_train[,-framingham_df_men_train$CVD], simulate_df_men_train)
+# weights 
+  simu_logit_weights_men <- glm(S ~ log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                 log(SYSBP_T+1)+CURSMOKE+DIABETES, data= combined_simu_train_men, family= "binomial")
+
+  simu_inverse_weights_train_men <- 1/(exp(predict(simu_logit_weights_men, newdata = framingham_df_men_train)))
+  
+  # tailored model
+  simu_logit_outcome_train_men <- glm(CVD ~ log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                   log(SYSBP_T+1)+CURSMOKE+DIABETES, 
+               data= framingham_df_men_train, weights = simu_inverse_weights_train_men, family= "binomial")
+  # Brier Risk for men
+  g_X_simu_men <- ifelse(predict(simu_logit_outcome_train_men, newdata = framingham_df_men_test, type = "response")>0.5, 1, 0)
+  pred_weights_simu_men <- predict(simu_logit_weights_men, newdata=framingham_df_men_test %>% dplyr::select(-'CVD'))
+  inverse_weights_test_simu_men <- 1/(exp(pred_weights_simu_men))
+  brier_score_simu_men <- sum((framingham_df_men_test$CVD-g_X_simu_men)^2*inverse_weights_test_simu_men)/nrow(simulate_df_men_test)
+  
+  # Women 
+  combined_simu_train_women <- rbind(framingham_df_women_train[,-framingham_df_women_train$CVD], simulate_df_women_train)
+  # weights 
+  simu_logit_weights_women <- glm(S ~ log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                 log(SYSBP_T+1)+CURSMOKE+DIABETES, data= combined_simu_train_women, family= "binomial")
+  simu_inverse_weights_train_women <- 1/(exp(predict(simu_logit_weights_women, newdata = framingham_df_women_train)))
+  # tailored model
+  simu_logit_outcome_train_women <- glm(CVD ~ log(HDLC)+log(TOTCHOL)+log(AGE)+log(SYSBP_UT+1)+
+                   log(SYSBP_T+1)+CURSMOKE+DIABETES, 
+               data= framingham_df_women_train, weights = simu_inverse_weights_train_women, family= "binomial")
+  # Brier Risk
+  g_X_simu_women <- ifelse(predict(simu_logit_outcome_train_women, newdata = framingham_df_women_test, type = "response")>0.5, 1, 0)
+  pred_weights_simu_women <- predict(simu_logit_weights_women, newdata=framingham_df_women_test %>% dplyr::select(-'CVD'))
+  inverse_weights_test_simu_women <- 1/(exp(pred_weights_simu_women))
+  brier_simu_women <- sum((framingham_df_women_test$CVD-g_X_simu_women)^2*inverse_weights_test_simu_women)/nrow(simulate_df_women_test)
+  
+  return(c(brier_score_simu_men, brier_simu_women))
+}
+```
+
+```{r, warning=FALSE, eval=FALSE}
+# Initialize data frame to store Brier scores
+simu_case_III_brier_scores <- matrix(nrow = 1000, ncol = 2)
+# Perform 1000 simulations
+set.seed(1223)
+for(i in 1:1000) {
+  simu_case_III_brier_scores[i, ] <- simulate_brier_score_case_III()
+}
+colnames(simu_case_III_brier_scores) <- c("Men", "Women")
+# view(simu_case_II_brier_scores)
+```
+
+```{r}
+# saveRDS(simu_case_III_brier_scores, file = "/Users/jialinliu/Downloads/simu_case_III_brier_scores.RDS")
+simu_case_III_brier_scores <- readRDS("/Users/jialinliu/Downloads/simu_case_III_brier_scores.RDS")
+```
+
+```{r}
+# Mean
+simu_case_III_men_avg <- mean(simu_case_III_brier_scores[,1])
+simu_case_III_women_avg <- mean(simu_case_III_brier_scores[,2])
+# SD
+simu_case_III_men_sd <- sd(simu_case_III_brier_scores[,1])
+simu_case_III_women_sd <- sd(simu_case_III_brier_scores[,2])
+```
+
+```{r, fig.height=3.5, fig.width=4}
+cor_matrix = cor(df_2017[ ,c("AGE", "SYSBP", "BMI", "HDLC", "TOTCHOL")], method='pearson',use='complete.obs')
+
+# Now produce the plot
+corrplot(cor_matrix, method='color', addCoef.col = "black", cl.lim=c(-1,1), col=colorRampPalette(c("pink","white","red"))(200), tl.col = "black", tl.pos = "lt", title = "Correlation Matrix in NHANES-2017", mar=c(0,0,1,0))
+```
+
+```{r, fig.height=3.5, fig.width=4}
+set.seed(1223)
+cor_matrix_I = cor(simulate_data_case_I()[ ,c("AGE", "SYSBP", "BMI", "HDLC", "TOTCHOL")], method='pearson',use='complete.obs')
+
+# Now produce the plot
+corrplot(cor_matrix_I, method='color', addCoef.col = "black", cl.lim=c(-1,1), col=colorRampPalette(c("pink","white","red"))(200), tl.col = "black", tl.pos = "lt", title = "Correlation Matrix in Simulation Case I", mar=c(0,0,1,0))
+```
+```{r, fig.height=3.5, fig.width=4}
+set.seed(1223)
+cor_matrix_II = cor(simulate_data_case_II()[ ,c("AGE", "SYSBP", "BMI", "HDLC", "TOTCHOL")], method='pearson',use='complete.obs')
+
+# Now produce the plot
+corrplot(cor_matrix_II, method='color', addCoef.col = "black", cl.lim=c(-1,1), col=colorRampPalette(c("pink","white","red"))(200), tl.col = "black", tl.pos = "lt", title = "Correlation Matrix in Simulation Case II", mar=c(0,0,1,0))
+```
+
+```{r, fig.height=3.5, fig.width=4}
+set.seed(1223)
+cor_matrix_III = cor(simulate_data_case_III()[ ,c("AGE", "SYSBP", "BMI", "HDLC", "TOTCHOL")], method='pearson',use='complete.obs')
+
+# Now produce the plot
+corrplot(cor_matrix_III, method='color', addCoef.col = "black", cl.lim=c(-1,1), col=colorRampPalette(c("pink","white","red"))(200), tl.col = "black", tl.pos = "lt", title = "Correlation Matrix in Simulation Case III", mar=c(0,0,1,0))
+```
+
+
+```{r, fig.height=2.5}
+set.seed(1223)
+library(plyr)
+mu1 <- ddply(simulate_data_case_I(), "SEX", summarise, grp.mean=mean(AGE))
+d1 <- ggplot(simulate_data_case_I(), aes(x = AGE, color = as.factor(SEX))) +
+  geom_density() +
+  geom_vline(data=mu1, aes(xintercept=grp.mean, color=as.factor(SEX)),
+             linetype="dashed")+
+  theme_minimal() +
+    theme(legend.position = "none",
+        plot.title = element_text(size = 5, face = "bold"),text = element_text(size=6))+
+  scale_color_brewer(palette="Set1")+
+  # annotate("text", x=200, y=0.015, label= "shape = 40.1881, rate = 0.2896",
+  #          col="blue", size=3, parse=F)+
+  labs(title = "Distribution of Log Transformation of Age",
+       x = "Age",
+       y = "Density")
+
+mu2 <- ddply(simulate_data_case_II(), "SEX", summarise, grp.mean=mean(AGE))
+d2 <- ggplot(simulate_data_case_II(), aes(x = AGE, color = as.factor(SEX))) +
+  geom_density() +
+  geom_vline(data=mu2, aes(xintercept=grp.mean, color=as.factor(SEX)),
+             linetype="dashed")+
+  theme_minimal() +
+  theme(legend.position = "none",
+        plot.title = element_text(size = 5, face = "bold"),text = element_text(size=6))+
+  scale_color_brewer(palette="Set1")+
+  # annotate("text", x=70, y=0.03, label= "mean = 52.41, sd = 12.60",
+  #          col="blue", size=3, parse=F)+
+  labs(title = "Normal Distribution of Age",
+       x = "Age",
+       y = "Density")
+
+mu3 <- ddply(simulate_data_case_III(), "SEX", summarise, grp.mean=mean(AGE))
+d3 <- ggplot(simulate_data_case_III(), aes(x = AGE, color = as.factor(SEX))) +
+  geom_density() +
+  geom_vline(data=mu3, aes(xintercept=grp.mean, color=as.factor(SEX)),
+             linetype="dashed")+
+  theme_minimal() +
+  theme(legend.position = "none",
+        plot.title = element_text(size = 5, face = "bold"),text = element_text(size=6))+
+  scale_color_brewer(palette="Set1")+  # annotate("text", x=70, y=0.03, label= "min = 30, max = 74",
+  #          col="blue", size=3, parse=F)+
+  labs(title = "Uniform Distribution of Age",
+       x = "Age",
+       y = "Density")
+
+dist_age_result <- ggarrange(d1, d2, d3, ncol = 3)
+dist_age_result
+ggsave(filename = "dist_age_result.png", plot = dist_age_result, device = "png", path = "/Users/jialinliu/Desktop", dpi = 500, height = 2, width = 5, units = "in", bg = "white")
+```
+
+```{r, fig.height=2.5}
+set.seed(1223)
+library(plyr)
+mu1_SYSBP <- ddply(df_2017, "SEX", summarise, grp.mean=mean(SYSBP))
+d1_SYSBP <- ggplot(df_2017, aes(x = SYSBP, color = as.factor(SEX))) +
+  geom_density() +
+  geom_vline(data=mu1_SYSBP, aes(xintercept=grp.mean, color=as.factor(SEX)),
+             linetype="dashed")+
+  theme_minimal() +
+    theme(legend.position = "none",
+        plot.title = element_text(size = 5, face = "bold"),text = element_text(size=6))+
+  scale_color_brewer(palette="Set1")+
+  # annotate("text", x=200, y=0.015, label= "shape = 40.1881, rate = 0.2896",
+  #          col="blue", size=3, parse=F)+
+  labs(title = "True Distribution of Systolic Blood Pressure in NHANES data",
+       x = "Systolic Blood Pressure",
+       y = "Density")
+
+mu2_SYSBP <- ddply(simulate_data_case_I(), "SEX", summarise, grp.mean=mean(SYSBP))
+d2_SYSBP <- ggplot(simulate_data_case_I(), aes(x = SYSBP, color = as.factor(SEX))) +
+  geom_density() +
+  geom_vline(data=mu2_SYSBP, aes(xintercept=grp.mean, color=as.factor(SEX)),
+             linetype="dashed")+
+  theme_minimal() +
+  theme(legend.position = "none",
+        plot.title = element_text(size = 5, face = "bold"),text = element_text(size=6))+
+  scale_color_brewer(palette="Set1")+
+  # annotate("text", x=70, y=0.03, label= "mean = 52.41, sd = 12.60",
+  #          col="blue", size=3, parse=F)+
+  labs(title = "Distribution of Systolic Blood Pressure in Simulation Case I",
+       x = "Systolic Blood Pressure",
+       y = "Density")
+
+mu3_SYSBP <- ddply(simulate_data_case_II(), "SEX", summarise, grp.mean=mean(SYSBP))
+d3_SYSBP <- ggplot(simulate_data_case_II(), aes(x = SYSBP, color = as.factor(SEX))) +
+  geom_density() +
+  geom_vline(data=mu3_SYSBP, aes(xintercept=grp.mean, color=as.factor(SEX)),
+             linetype="dashed")+
+  theme_minimal() +
+  theme(legend.position = "none",
+        plot.title = element_text(size = 5, face = "bold"),text = element_text(size=6))+
+  scale_color_brewer(palette="Set1")+  # annotate("text", x=70, y=0.03, label= "min = 30, max = 74",
+  #          col="blue", size=3, parse=F)+
+  labs(title = "Distribution of Systolic Blood Pressure Case II & III",
+       x = "Systolic Blood Pressure",
+       y = "Density")
+
+dist_SYSBP_result <- ggarrange(d1_SYSBP, d2_SYSBP, d3_SYSBP, ncol = 3)
+dist_SYSBP_result
+ggsave(filename = "dist_SYSBP_result.png", plot = dist_SYSBP_result, device = "png", path = "/Users/jialinliu/Desktop", dpi = 500, height = 2, width = 5, units = "in", bg = "white")
+```
+
+```{r, fig.height=2.5}
+set.seed(1223)
+library(plyr)
+mu1_BMI <- ddply(df_2017, "SEX", summarise, grp.mean=mean(BMI))
+d1_BMI <- ggplot(df_2017, aes(x = BMI, color = as.factor(SEX))) +
+  geom_density() +
+  geom_vline(data=mu1_BMI, aes(xintercept=grp.mean, color=as.factor(SEX)),
+             linetype="dashed")+
+  theme_minimal() +
+    theme(legend.position = "none",
+        plot.title = element_text(size = 5, face = "bold"),text = element_text(size=6))+
+  scale_color_brewer(palette="Set1")+
+  # annotate("text", x=200, y=0.015, label= "shape = 40.1881, rate = 0.2896",
+  #          col="blue", size=3, parse=F)+
+  labs(title = "True Distribution of BMI Levels in NHANES data",
+       x = "BMI",
+       y = "Density")
+
+mu2_BMI <- ddply(simulate_data_case_I(), "SEX", summarise, grp.mean=mean(BMI))
+d2_BMI <- ggplot(simulate_data_case_I(), aes(x = BMI, color = as.factor(SEX))) +
+  geom_density() +
+  geom_vline(data=mu2_BMI, aes(xintercept=grp.mean, color=as.factor(SEX)),
+             linetype="dashed")+
+  theme_minimal() +
+  theme(legend.position = "none",
+        plot.title = element_text(size = 5, face = "bold"),text = element_text(size=6))+
+  scale_color_brewer(palette="Set1")+
+  # annotate("text", x=70, y=0.03, label= "mean = 52.41, sd = 12.60",
+  #          col="blue", size=3, parse=F)+
+  labs(title = "Distribution of BMI Levels in Simulation Case I",
+       x = "BMI",
+       y = "Density")
+
+mu3_BMI <- ddply(simulate_data_case_II(), "SEX", summarise, grp.mean=mean(BMI))
+d3_BMI <- ggplot(simulate_data_case_II(), aes(x = BMI, color = as.factor(SEX))) +
+  geom_density() +
+  geom_vline(data=mu3_BMI, aes(xintercept=grp.mean, color=as.factor(SEX)),
+             linetype="dashed")+
+  theme_minimal() +
+  theme(legend.position = "none",
+        plot.title = element_text(size = 5, face = "bold"),text = element_text(size=6))+
+  scale_color_brewer(palette="Set1")+  # annotate("text", x=70, y=0.03, label= "min = 30, max = 74",
+  #          col="blue", size=3, parse=F)+
+  labs(title = "Distribution of BMI Levels in Simulation Case II & III",
+       x = "BMI",
+       y = "Density")
+
+dist_BMI_result <- ggarrange(d1_BMI, d2_BMI, d3_BMI, ncol = 3)
+dist_BMI_result
+ggsave(filename = "dist_BMI_result.png", plot = dist_BMI_result, device = "png", path = "/Users/jialinliu/Desktop", dpi = 500, height = 2, width = 5, units = "in", bg = "white")
+```
+
+```{r, fig.height=2.5}
+set.seed(1223)
+library(plyr)
+mu1_HDLC <- ddply(df_2017, "SEX", summarise, grp.mean=mean(HDLC))
+d1_HDLC <- ggplot(df_2017, aes(x = HDLC, color = as.factor(SEX))) +
+  geom_density() +
+  geom_vline(data=mu1_HDLC, aes(xintercept=grp.mean, color=as.factor(SEX)),
+             linetype="dashed")+
+  theme_minimal() +
+    theme(legend.position = "none",
+        plot.title = element_text(size = 5, face = "bold"),text = element_text(size=6))+
+  scale_color_brewer(palette="Set1")+
+  # annotate("text", x=200, y=0.015, label= "shape = 40.1881, rate = 0.2896",
+  #          col="blue", size=3, parse=F)+
+  labs(title = "True Distribution of Cholesterol in NHANES data",
+       x = "Cholesterol",
+       y = "Density")
+
+mu2_HDLC <- ddply(simulate_data_case_I(), "SEX", summarise, grp.mean=mean(HDLC))
+d2_HDLC <- ggplot(simulate_data_case_I(), aes(x = HDLC, color = as.factor(SEX))) +
+  geom_density() +
+  geom_vline(data=mu2_HDLC, aes(xintercept=grp.mean, color=as.factor(SEX)),
+             linetype="dashed")+
+  theme_minimal() +
+  theme(legend.position = "none",
+        plot.title = element_text(size = 5, face = "bold"),text = element_text(size=6))+
+  scale_color_brewer(palette="Set1")+
+  # annotate("text", x=70, y=0.03, label= "mean = 52.41, sd = 12.60",
+  #          col="blue", size=3, parse=F)+
+  labs(title = "Distribution of Cholesterol in Simulation Case I",
+       x = "Cholesterol",
+       y = "Density")
+
+mu3_HDLC <- ddply(simulate_data_case_II(), "SEX", summarise, grp.mean=mean(HDLC))
+d3_HDLC <- ggplot(simulate_data_case_II(), aes(x = HDLC, color = as.factor(SEX))) +
+  geom_density() +
+  geom_vline(data=mu3_HDLC, aes(xintercept=grp.mean, color=as.factor(SEX)),
+             linetype="dashed")+
+  theme_minimal() +
+  theme(legend.position = "none",
+        plot.title = element_text(size = 5, face = "bold"),text = element_text(size=6))+
+  scale_color_brewer(palette="Set1")+  # annotate("text", x=70, y=0.03, label= "min = 30, max = 74",
+  #          col="blue", size=3, parse=F)+
+  labs(title = "Distribution of Cholesterol in Simulation Case II & III",
+       x = "Cholesterol",
+       y = "Density")
+
+dist_HDLC_result <- ggarrange(d1_HDLC, d2_HDLC, d3_HDLC, ncol = 3)
+dist_HDLC_result
+ggsave(filename = "dist_HDLC_result.png", plot = dist_HDLC_result, device = "png", path = "/Users/jialinliu/Desktop", dpi = 500, height = 2, width = 5, units = "in", bg = "white")
+```
+
+```{r, fig.height=2.5}
+set.seed(1223)
+library(plyr)
+mu1_TOTCHOL <- ddply(df_2017, "SEX", summarise, grp.mean=mean(TOTCHOL))
+d1_TOTCHOL <- ggplot(df_2017, aes(x = TOTCHOL, color = as.factor(SEX))) +
+  geom_density() +
+  geom_vline(data=mu1_TOTCHOL, aes(xintercept=grp.mean, color=as.factor(SEX)),
+             linetype="dashed")+
+  theme_minimal() +
+    theme(legend.position = "none",
+        plot.title = element_text(size = 5, face = "bold"),text = element_text(size=6))+
+  scale_color_brewer(palette="Set1")+
+  # annotate("text", x=200, y=0.015, label= "shape = 40.1881, rate = 0.2896",
+  #          col="blue", size=3, parse=F)+
+  labs(title = "True Distribution of Total Cholesterol in NHANES data",
+       x = "Total Cholesterol",
+       y = "Density")
+
+mu2_TOTCHOL <- ddply(simulate_data_case_I(), "SEX", summarise, grp.mean=mean(TOTCHOL))
+d2_TOTCHOL <- ggplot(simulate_data_case_I(), aes(x = TOTCHOL, color = as.factor(SEX))) +
+  geom_density() +
+  geom_vline(data=mu2_TOTCHOL, aes(xintercept=grp.mean, color=as.factor(SEX)),
+             linetype="dashed")+
+  theme_minimal() +
+  theme(legend.position = "none",
+        plot.title = element_text(size = 5, face = "bold"),text = element_text(size=6))+
+  scale_color_brewer(palette="Set1")+
+  # annotate("text", x=70, y=0.03, label= "mean = 52.41, sd = 12.60",
+  #          col="blue", size=3, parse=F)+
+  labs(title = "Distribution of Total Cholesterol in Simulation Case I",
+       x = "Total Cholesterol",
+       y = "Density")
+
+mu3_TOTCHOL <- ddply(simulate_data_case_II(), "SEX", summarise, grp.mean=mean(TOTCHOL))
+d3_TOTCHOL <- ggplot(simulate_data_case_II(), aes(x = TOTCHOL, color = as.factor(SEX))) +
+  geom_density() +
+  geom_vline(data=mu3_TOTCHOL, aes(xintercept=grp.mean, color=as.factor(SEX)),
+             linetype="dashed")+
+  theme_minimal() +
+  theme(legend.position = "none",
+        plot.title = element_text(size = 5, face = "bold"),text = element_text(size=6))+
+  scale_color_brewer(palette="Set1")+  # annotate("text", x=70, y=0.03, label= "min = 30, max = 74",
+  #          col="blue", size=3, parse=F)+
+  labs(title = "Distribution of Total Cholesterol in Case II & III",
+       x = "Total Cholesterol",
+       y = "Density")
+
+dist_TOTCHOL_result <- ggarrange(d1_TOTCHOL, d2_TOTCHOL, d3_TOTCHOL, ncol = 3)
+dist_TOTCHOL_result
+ggsave(filename = "dist_TOTCHOL_result.png", plot = dist_TOTCHOL_result, device = "png", path = "/Users/jialinliu/Desktop", dpi = 500, height = 2, width = 5, units = "in", bg = "white")
+```
+
+
+```{r, fig.height=3}
+case_II_cumu_avg_men <- cumsum(simu_case_II_brier_scores[,1])/(1:2000)
+case_II_cumu_avg_women <- cumsum(simu_case_II_brier_scores[,2])/(1:2000)
+
+case_I_cumu_avg_men <- cumsum(simu_case_I_brier_scores[,1])/(1:2000)
+case_I_cumu_avg_women <- cumsum(simu_case_I_brier_scores[,2])/(1:2000)
+
+case_III_cumu_avg_men <- cumsum(simu_case_III_brier_scores[,1])/(1:1000)
+case_III_cumu_avg_women <- cumsum(simu_case_III_brier_scores[,2])/(1:1000)
+
+
+p1 <- ggplot(data.frame(Simulation = 1:300, CumulativeAverage = c(case_I_cumu_avg_men[1:300],case_I_cumu_avg_women[1:300]), Sex = as.factor(c(rep("Men", 300), rep("Women", 300)))), aes(x = Simulation, y = CumulativeAverage, by = Sex, color = Sex)) +
+  geom_line() +
+  ylim(0, 0.3)+
+  theme_minimal() +
+  theme(legend.position = "none",
+        plot.title = element_text(size = 8, face = "bold"),text = element_text(size=6))+
+  scale_color_brewer(palette="Set1")+
+  labs(title = "Simulation Case I",
+       x = "Number of Simulations",
+       y = "Average of Estimated Brier Scores")
+
+p2 <- ggplot(data.frame(Simulation = 1:300, CumulativeAverage = c(case_II_cumu_avg_men[1:300],case_II_cumu_avg_women[1:300]), Sex = as.factor(c(rep("Men", 300), rep("Women", 300)))), aes(x = Simulation, y = CumulativeAverage, by = Sex, color = Sex)) +
+  geom_line() +
+  ylim(0, 0.3)+
+  theme_minimal() +
+  theme(legend.position = "none",
+        plot.title = element_text(size = 8, face = "bold"),text = element_text(size=6))+
+  scale_color_brewer(palette="Set1")+
+  labs(title = "Simulation Case II",
+       x = "Number of Simulations",
+       y = "Average of Estimated Brier Scores")
+
+p3 <- ggplot(data.frame(Simulation = 1:300, CumulativeAverage = c(case_III_cumu_avg_men[1:300],case_III_cumu_avg_women[1:300]), Sex = as.factor(c(rep("Men", 300), rep("Women", 300)))), aes(x = Simulation, y = CumulativeAverage, by = Sex, color = Sex)) +
+  geom_line() +
+    ylim(0, 0.3)+
+  theme_minimal() +
+  theme(legend.position = "none",
+        plot.title = element_text(size = 8, face = "bold"),text = element_text(size=6))+
+  scale_color_brewer(palette="Set1")+
+  labs(title = "Simulation Case III",
+       x = "Number of Simulations",
+       y = "Average of Estimated Brier Scores")
+
+
+simu_comb_result <- ggarrange(p1, p2, p3, ncol = 3)
+simu_comb_result
+ggsave(filename = "simu_comb_result.png", plot = simu_comb_result, device = "png", path = "/Users/jialinliu/Desktop", dpi = 500, height = 2, width = 5, units = "in", bg = "white")
+```
+
+The above plot displays three simulation cases, each showing the average of estimated Brier scores as a function of the number of simulations. In all cases, the average Brier score stabilizes as the number of simulations are greater than 300, indicating the robustness of the simulation process. Case II and Case III show a higher average Brier score in both groups compared to Case I, which could suggest that the model's predictive performance differs across the scenarios. This stability and difference in levels of Brier scores among the cases could reflect the impact of including covariate associations in the simulations, as higher scores indicate a weak performance of transportability  in the target set.
+
+```{r}
+simu_brier_score_table <- data.frame(MenAvg = c(0.1813, 0.2773,0.2649), MenSD  = c(0.0119, 0.0192, 0.0190), WomenAvg = c(0.0326,0.0526,0.0483), WomenSD = c(0.0046,0.0084,0.0081))
+rownames(simu_brier_score_table) <- c("Simulation Case I", 
+                                 "Simulation Case II", "Simulation Case III")
+# colnames(brier_score_table) <- c("Men", "Women")
+simu_brier_score_table %>% round(4) %>% 
+  kable(
+        caption = "Estimated Brier Scores in the Simulated Target Population",
+        align = "c",
+        booktabs = T) %>% 
+  kable_styling(latex_options = c('HOLD_position', 'striped')) %>%
+  row_spec(1, bold = T)
+```
+
+Table 4 indicates that in Simulation Case I, men had an average Brier score of 0.1813 with a standard deviation (SD) of 0.0119, and women had an average of 0.0326 with an SD of 0.0046. Simulation Case II shows an increase in average Brier scores for both men (0.2773) and women (0.0526), with corresponding increases in SD. Simulation Case III presents average scores slightly lower than Case II but higher than Case I for both genders, indicating misspecification of distributions of variables and the importance of covariate associations in the model's predictive accuracy. For example, the above plots compare the distributions of BMI and cholesterol levels stratified by gender between the NHANES data and three simulation cases, where the red line always represents males and the blue line always represents females. The BMI distributions in the simulation case I deviance a lot from the NHANES data. The same can be observed for the cholesterol and total cholesterol levels, with large deviations in the spreads of the distributions between the true data and the simulations. These plots suggest that the simulations of BMI and cholesterol levels cannot reliably replicate the true distribution of these health-related metrics. Nevertheless, distributions of age and systolic blood pressure in the simulation cases are closely aligned with the NHANES data, indicating that the simulations are accurately reflecting the true data.
+
+# Conclusions and Limitations
+
+In our simulation design, the primary objective is to estimate Brier risk scores in the simulated populations using the methodologies outlined in previously published works. Subsequently, we leverage these scores, segmented by gender, to assess the performance of tailored models within our simulated target population. Table 4 presents a breakdown of three Brier scores for each data generation method, categorized by sex. Notably, the Brier scores in the first simulation case fall below the estimations derived from the 2017 NHANES data, suggesting that our simulation closely approximates the true covariate distributions found in the NHANES sample data. However, it is evident that the second and the third data generation methods have higher Brier scores in two groups, as these two methods do not accurately capture covariate associations in the process of simulation. Based on the correlation matrices shown above, we observe that only the first simulation case exhibits a correlation pattern that closely resembles that of the NHANES data, whereas simulation cases II and III demonstrate a notably weaker correlation similarity with the true target population.
+
+The primary limitation of our simulation study arises from the sequential nature of the simulation process. For instance, although we have identified certain categorical variables that play significant roles in predicting specific categorical outcomes, such as gender, the order in which the simulation unfolds prevents us from possessing information about covariates before simulating gender. Consequently, we are constrained in our ability to generate potentially correlated data at this stage. Furthermore, our simulation study does not account for various factors that may vary, such as differing correlation matrices among covariates. These limitations underscore the need for further research to refine and enhance our modeling approaches.
+
+# References
