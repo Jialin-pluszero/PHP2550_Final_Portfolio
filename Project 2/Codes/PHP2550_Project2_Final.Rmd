@@ -1,0 +1,784 @@
+---
+title: "Prediction Model for Tracheostomy Needs or Mortality in Neonates with Severe Bronchopulmonary Dysplasia"
+author: "Jialin Liu"
+date: "2023-12-15"
+output: pdf_document
+bibliography: Project_2_references.bib
+---
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE, include=FALSE}
+# Load libraries
+library(tidyverse)
+library(dplyr)
+library(glmnet)
+library(mice)
+library(caret)
+library(MASS)
+library(data.table)
+library(gt)
+library(gtsummary)
+library(flextable)
+library(kableExtra)
+library(ggplot2)
+library(corrplot)
+library(ggpubr)
+library(lme4)
+library(pROC)
+knitr::opts_chunk$set(echo =  F, warning = F, message = F, fig.align = 'center')
+```
+
+# Abstract
+   **Background:** Current prediction models, utilizing extensive databases, can estimate the probability of tracheostomy placement or mortality based on baseline demographics and clinical diagnoses. However, these analyses have yet to leverage detailed respiratory parameters and do not offer predictions at various post-menstrual ages (PMA). This study introduces a novel predictive model designed to address this gap.
+   
+   **Methods:** We have developed and internally validated a logistic regression mixed-effects model aimed at predicting the need for tracheostomy in infants afflicted with severe bronchopulmonary dysplasia. Variable selection techniques, including the lasso and forward stepwise methods, were employed to identify the most pertinent variables for inclusion in the logistic model. Both models underwent rigorous internal validation, and their performance matrices were assessed.
+   
+   **Results:** In the 36-week models, birth-related variables including birth weight, height, and head circumference showed significance in predicting adverse outcomes based on small p-values for estimated coefficients. Respiratory-related variables about ventilation support levels, fraction of inspired oxygen, peak inspiratory pressure, and exploratory pressure played significant roles in prediction. The 44-week models included critical variables of prenatal corticosteroids, complete prenatal steroids, and respiratory parameters measured at 36 weeks. Furthermore, parameters measured at 44 weeks, such as medication for pulmonary hypertension, peak inspiratory pressure, positive end exploratory pressure, ventilation support levels, and fraction of inspired oxygen, emerged as crucial factors in predicting the need for Tracheostomy placement or mortality.
+   
+   **Conclusion:** These conclusions stem from a medical study evaluating the necessity for Tracheostomy or adverse outcomes, with the 44-week models generally exhibiting superior predictive performance compared to the 36-week models with a higher AUC of 91.5%.
+   
+# Introduction
+
+Bronchopulmonary dysplasia (BPD), also known as chronic lung disease, causes long-term breathing problems in newborn babies especially for those who are born prematurely. As the most common complication of prematurity, this disease affects estimated 10,000-15,000 infants each year in the United States, which is caused many multifactorial individual characteristics both from genetic and epigenetic aspects and substantial impact infant's susceptibility[@Jensen2014]. Compared to the healthy lung tissue which can support normal breathing, the lungs with BPD have fewer and larger the tiny air sacs of the lung (alveoli), causing tissue destruction (fibrosis and metaplasia) within the lungs and usually showing signs of respiratory distress, such as breathing quickly and grunting[@Sweet2005]. This deficit in pulmonary vascular development has no cure, but it can be treated and most babies go on to live a long and healthy life. There are four levels of severity of BPD, in particular, 75% of babies with grade 3 BPD are always dependent on a ventilator at 36 weeks gestational age when they are discharged from the hospital. To allow babies to be hooked up to a ventilator for a long time, they needs a tracheostomy that is a surgical hole in the neck and tube inserted in the trachea to allow them in breath and out breath to lungs. Since some studies show that tracheostomy associated with improved outcomes within 4 months of age and a list of benefits to performing a tracheostomy, up to 12% babies with severe grade 3 BPD are required to have a tracheostomy[@Akangire2023]. However, risks associated with a tracheostomy are also existing, which include increased risk of death compared to no tracheostomy, accidentally cannula obstruction or abscission, and increased rates of infection on skin, trachea and lungs.
+
+Existing prediction models based on large databases can accurately estimate the likelihood of tracheostomy placement or death given baseline demographics and clinical diagnoses. However, these analyses have not used detailed respiratory parameters and have not provided prediction at different post-menstrual age (PMA). Accurate prediction the need for tracheostomy at early PMA would have implications for counseling of families and appropriate timing og tracheostomy placement, which is an active area of debate in severe BPD (sBPD). Motivated by deficiency in the previous work, models are designed to determine who really needs a tracheostomy, and when is an ideal time frame to refer a patient for tracheostomy. We will be using clinical data collected from multicenter, retrospective case-control study and recorded infants who are born at $\leq 32$ weeks and their respiratory support at 36 and 44 weeks PMA. Outcomes of interest (tracheostomy or death) are recorded at the time point when they were discharged from hospitals. We developed and validated two prediction models and compared the performance of their predictability with respect to eventual needs for tracheostomy or death prior to discharge. 
+
+```{r}
+trach_df <- read.csv("project2.csv")
+```
+
+# Methods
+## Study Population
+This study analyzed data from a national data set of demographic, diagnostic, and respiratory parameters of infants with sBPD admitted to collaborative Neonatal intensive care units (NICUs) across multiple centers. The data consists of 999 participants who are born at $\leq 32$ weeks and their corresponding 30 factors and outcomes of eventually healthy status at(or before) discharge. The rest of this section is devoted to describing summary statistics, procedures for preprocessing data, exploring any potential relationships between variables as well as missing values before building models with variable selection. We will conduct brief exploratory data analysis in terms of three aspects: birth and demographic variables, respiratory support variables, weight and tracheostomy placement at 36 and 44 weeks. 
+
+Of those 999 patients' records, some duplicated patient ID with information have been detected and removed for further analysis. To make sure completeness of outcome variables, we found two places of missingness in `Death` outcome variable. One of them should be corrected as "No" death since this patient was discharged from hospital at 43 weeks without tracheostomy placement, thus it is reasonable to replace this missing value with known outcome based on our basic speculation. The another missing value in `Death` cannot be deduced as missing value appeared in hospital discharge gestational age `hosp_dc_ga`, without this supporting information, we couldn't make assumption upon these bunch lack of data so that we removed this particular patient from our observational data. For conciseness and fewer number of models needed to construct, we combined two outcomes of interest, `Trach` and `Death`, into one final outcome about healthy status that refers to "Yes(1)" when babies neither had tracheostomy placement nor died at(or before) discharge, and conversely, "No(0)" represents adverse outcome of health, equally saying, babies either had tracheostomy or died.
+
+For hospital discharge `hosp_dc_ga` variable, there exists some values that lie far much away from the main body of observations and may distort summaries of the distribution. For example, some cases showed hospital discharge gestational ages are greater than 300 weeks, which seems to be irrational in this study, since, based on boxplot and interquartile range, most often patients were discharged around 40-50 weeks. Therefore, we simply removed those few cases. Additionally, the data has been collected from multiple centers, we wanted to check if number of observations are evenly distributed and balanced. We found that center 20 and 21 only consisted with a total of 5 patients, which sample size are too small to conduct further analysis on these two centers. So we decided to remove `center` from further models due to usability of predictive models across different populations. In addition, levels in maternal race variable did not align with specified categories shown in the code book. Without explanation for this error, we removed this variable. For model simplicity, we considered respiratory and diagnostic related variables measured at 36 weeks only, and further analyses will be considered to add later time points and give a more comprehensive insight into an ideal time point to refer patients for tracheostomy. 
+
+```{r}
+##== remove duplicated id
+duplicate_id <- unique(trach_df$record_id)[table(trach_df$record_id) >1]
+trach_df <- trach_df[-which(trach_df$record_id==duplicate_id)[-1],]
+
+##== remove death NA and transfer one NA to no
+which.death.na <- which(is.na(trach_df$Death))
+trach_df[which.death.na[1],]$Death <- "No"
+trach_df <- trach_df[-which.death.na[2],]
+
+##== remove hospital discharge gestational age
+trach_df <- trach_df[-which(trach_df$hosp_dc_ga >= 250),]
+# boxplot(trach_df$hosp_dc_ga)
+
+##== factorize all categorical variables
+chr_names <- c('mat_ethn','del_method', 'prenat_ster' ,'com_prenat_ster', 'mat_chorio', 'ventilation_support_level.36', 'gender', 'sga', 'any_surf', 'med_ph.36', 'Death')
+trach_df[,chr_names] <- lapply(trach_df[,chr_names] , factor)
+```
+
+```{r}
+##== Combine outcomes to one variable
+trach_df$adverse_outcome <- ifelse(trach_df$Trach==0 & trach_df$Death == "No", 0, 1)
+trach_df$adverse_outcome <- as.factor(trach_df$adverse_outcome)
+
+##== remove center 21 and 20, and trach & death columns
+trach_df <- trach_df  %>% dplyr::select(-c("record_id", "mat_race", "Trach", "Death"))
+
+##== Subset 36 weeks data
+trach_36_df <- trach_df %>% dplyr::select(-c("weight_today.44", "ventilation_support_level_modified.44", "inspired_oxygen.44", "p_delta.44", "peep_cm_h2o_modified.44", "med_ph.44"))
+##== factorize center variable
+trach_36_df$center <- as.factor(trach_36_df$center)
+
+trach_44_df <- trach_df
+trach_44_df$center <- as.factor(trach_44_df$center)
+```
+
+Table 1 describes summary statistics for a part of participant birth and demographic variables, stratified by outcome of interest `adverse_outcome`, with the sample size for healthy group being 806 (noted as N = 806) and for group who either had tracheostomy placement or died prior to discharge (N = 182). Birth variables, which include birth weight (in g) `bw`, birth length (in centimeters) `blength`, and head circumference at birth `birth_hc`, show statistically significant differences between healthy and non-healthy groups since all p-values are greatly less than significance level ($\alpha = 0.05$). In particular, we could observe that those babies who had adverse outcome are high likely to have lower birth weights (mean of 757g) and smaller hear circumference (mean of 22.89cm), probably due to prematurity, than those who hadn't tracheostomy placement or died at discharge birth weights (mean of 816g) and larger head circumference (mean of 23.25cm). Delivery Method `del_method` was reported as categorical data with two methods: 1 represents for vaginal delivery and 2 represents for cesarean section. Higher percentage of babies who were delivered by cesarean section experienced adverse outcome than those who were delivered by vaginal method, with a significance difference between two groups based on a small p-value from Chi-squared test. One notable thing is that `any_surf` to record if the infant receive surfactant in the first 72 hours consisted with 44% of missingness in the original data set, thus it is crucial to carefully criticize whether the assumptions of multiple imputation are likely to hold and this variable cannot be reasonably imputed from the other available data by multiple imputation method. 
+
+```{r, warning=FALSE}
+##== summary table by outcome 
+Table1 <- trach_36_df %>% 
+  dplyr::select(c('bw','blength', 'birth_hc', 'del_method', 'prenat_ster', 'sga', 'any_surf', 'adverse_outcome')) %>%
+  tbl_summary(
+    missing = "no",
+    by = adverse_outcome,
+    type = list(where(is.numeric) ~ 'continuous2',
+                prenat_ster ~ 'categorical',
+                any_surf ~ 'categorical'),
+    statistic = list(
+    all_continuous() ~ c("{mean} ({max}, {sd})"),
+    all_categorical() ~ "{n} ({p}%)"
+    )
+  ) %>%
+  bold_labels() %>%
+  add_n(statistic = "{n_miss} ({p_miss}%)") %>%
+  add_p() %>%
+  modify_header(n = "**Missing**") %>%
+  as_kable_extra(booktabs = T, escape = T, longtable = T, caption="Participants Baseline Demographics Variables") %>%
+  kable_styling(latex_options = "striped")
+Table1
+# save_as_image(Table1, path = "/Users/jialinliu/Desktop/PHP 2550/Project2/Table1.png", zoom = 3, expand = 15, webshot = "webshot")
+```
+
+Table 2 provides data on respiratory-related variables measured at 36 weeks across different centers with an additional column for missing center name. For weight at 36 weeks `weight_today.36` variable, statistically significant p-value (0.021) is measured to assess a tendency of weights in at least one of the groups to be different than weights in at least one of the other group. The mean weight ranges from 2,073 grams in center 1 to 1,922 grams in center 5, with varying levels of missing data, potentially indicating variability in the mean weights at 36 weeks across multiple centers. For categorical ventilation support level at 36 weeks `ventilation_support_level.36` with three levels (0 means no respiratory support; 1 means non-invasive positive pressure; and 2 means invasive positive pressure) shows a significant difference across different centers (p < 0.001) by the Pearson's Chi-squared test. Even though Chi-squared test is the most commonly used test for assessing difference in distribution of a categorical variable between two or more independent groups (`center` here), the Chi-squared approximation to the distribution of the test statistic relies on the counts being roughly normally distributed. Because many of cell sizes are very small being less than 5 observations, the approximation may be poor. Instead, we run the Chi-squared test with computation of the simulated p-values, and resulted in a strong association between `center` and `ventilation_support_level.36` variables. The mean fraction of inspired oxygen at 36 weeks `inspired_oxygen.36` also varies significantly (p < 0.001) across centers. Some centers reported higher proportion of missingness, such as 43% in center 12. The peak inspiratory pressure ($cmH_2O$) at 36 weeks shows significant difference in at least one center (p < 0.001) compared to others, and a still high percentage of missingness observed in center 12, as well as in positive and exploratory pressure ($cmH_2O$) at 36 weeks `peep_cm_h2o.36` variable. For medication for pulmonary hypertension at 36 weeks `med_ph.36`, we could reject the null hypothesis and conclude that there is a strong association between center and medication for pulmonary hypertension given a significantly small p-value. Lastly, the mean hospital discharge gestational age `hosp_dc_ga` appears to have significant differences across centers, with a 100% missing rate in center 4 and 98% of missingness in center 1. There is notable variability of missingness in these respiratory variables at 36 weeks across centers, for example, center 12 consisted with almost half missing values in variables related to inspiratory and exploratory pressure and inspired oxygen, and some centers did not record hospital discharge gestational age at all. These missing data rates are concerning, which could impact the reliability of the statistical analyses.
+
+The below heatmap shows the correlation coefficients between three different birth variables: birth weight (`bw`), birth length (`blength`), and head circumference at birth (`birth_hc`). The colors range from red to white, where deep red indicates a stronger positive correlation, and white would indicate no correlation. The scale goes from -1 to 1, where 1 means a perfect positive correlation, whereas -1 would mean a perfect negative correlation. All the variables show strong positive correlations with each other (0.7 or higher), meaning as one variable increases, the others tend to increase as well. Below the heatmap are three distribution plots, which represent respiratory variables for newborns at 36 weeks (pink regions) and 44 weeks (blue regions). The first plot shows the distribution of fraction of inspired oxygen", which is typically a measure of the oxygen concentration in the air mixture being delivered to a patient. We can observe that the distribution of inspired oxygen at 44 weeks are generally higher than that of variable at 36 weeks, especially with a higher peak at 44 weeks. The second plot about the distribution of peak inspiratory pressure, which is a measure used in ventilator settings during mechanical ventilation, indicates a higher density in lower inspiratory pressure settings at 36 weeks. The third plot appears to be positive and exploratory pressure, but it looks to be fluctuated at 36 weeks with an overall higher density than the measure at 44 weeks.
+
+```{r}
+##== define custom test
+chisq.test.simulate.p.values <- function(data, variable, by, ...) {
+  result <- list()
+  test_results <- stats::fisher.test(data[[variable]], data[[by]], simulate.p.value = TRUE)
+  result$p <- test_results$p.value
+  result$test <- test_results$method
+  result
+}
+##== summary table by center
+trach_36_df %>% filter(!center %in% c(20,21)) %>% 
+  mutate(center = fct_explicit_na(center)) %>%
+  dplyr::select(-c('mat_ethn', 'bw','ga', 'blength', 'birth_hc', 'del_method', 'prenat_ster', 'com_prenat_ster', 'mat_chorio', 'gender', 'sga', 'any_surf', 'adverse_outcome')) %>%
+  tbl_summary(
+    missing = "no",
+    by = center,
+    type = list(where(is.numeric) ~ 'continuous2'),
+    statistic = list(
+    all_continuous() ~ c("{mean} ({sd})",
+                               "{N_miss} ({p_miss}%)"),
+    all_categorical() ~ "{n} ({p}%)"
+    )
+  ) %>%
+  bold_labels() %>%
+  add_p(all_categorical() ~ "chisq.test.simulate.p.values") %>%
+  modify_footnote(everything() ~ NA) %>%
+  as_kable_extra(booktabs = TRUE, caption = "Summary Statistics of Respiratory Variables at 36 Weeks by Center") %>%
+  kableExtra::footnote()%>%
+  kableExtra::kable_styling(font_size = 18, latex_options="scale_down") 
+```
+
+```{r, fig.height=4, fig.width=4.5}
+cor_matrix = cor(trach_df[ ,c("bw", "blength", "birth_hc")], method='pearson',use='complete.obs')
+
+# Now produce the plot
+corrplot(cor_matrix, method='color', addCoef.col = "black", cl.lim=c(0,1), col=colorRampPalette(c("pink","white","red"))(200), tl.col = "black", tl.pos = "lt", title = "Correlation Matrix of Birth Variables", mar=c(0,0,1,0))
+```
+
+```{r, fig.height=3, warning=FALSE}
+p1 <- ggplot(trach_df) + 
+    geom_density(aes(x = inspired_oxygen.36), alpha=.6, fill="#FF2166") +
+  geom_density(aes(x = inspired_oxygen.44), alpha=.6, fill="blue") +
+labs(x='Fraction of Inspired Oxygen',              
+       y='Density',
+       title = 'Distributions at 36 weeks and 44 weeks') +
+  theme_bw()+
+  theme(legend.position = "bottom",
+        plot.title = element_text(size = 3, face = "bold"),text = element_text(size=6))
+
+p2 <- ggplot(trach_df) + 
+  geom_density(aes(x = p_delta.36), fill="#FF2166", alpha=.6) +
+  geom_density(aes(x = p_delta.44), fill="blue", alpha=.6)+
+  labs(x='Peak Inspiratory Pressure',              
+       y='Density',
+       title = 'Distributions at 36 weeks and 44 weeks') +
+  theme_bw()+
+  theme(legend.position = "bottom",
+        plot.title = element_text(size = 3, face = "bold"),text = element_text(size=6))
+
+p3 <- ggplot(trach_df) + 
+  geom_density(aes(x = peep_cm_h2o_modified.36), fill="#FF2166", alpha=.6) +
+  geom_density(aes(x = peep_cm_h2o_modified.44), fill="blue", alpha=.6)+
+  labs(x='Positive and Exploratory Pressure',              
+       y='Density',
+       title = 'Distributions at 36 weeks and 44 weeks') +
+  theme_bw()+
+  theme(legend.position = "bottom",
+        plot.title = element_text(size = 3, face = "bold"),text = element_text(size=6))
+
+EDA_result <- ggarrange(p1, p2, p3, ncol = 3)
+EDA_result
+ggsave(filename = "EDA_result.png", plot = EDA_result, device = "png", path = "/Users/jialinliu/Desktop", dpi = 500, height = 2, width = 5, units = "in", bg = "white")
+```
+
+
+## Multiple Imputation
+
+Multiple imputation is applied to address missing values by creating 5 complete datasets. This method is trying to handle with each missing entry by estimating multiple reliable values such as regression models, running analysis across those completed dataset, aggregating all previous results, and analyzing how far they spread out in terms of standard deviations and confidence intervals. We constructed train-test sets and fitted the imputation model on the train data and applied the model to the test set. Given 5 complete train datasets, we will run lasso and forward stepwise regression for variables selection and use combined 5 test data as a validation dataset to assess performance of each model. 
+
+```{r, warning=FALSE}
+set.seed(1)
+ignore <- sample(c(TRUE, FALSE), size = nrow(trach_36_df), replace = TRUE, prob = c(0.25, 0.75))
+
+trach_36_df <- trach_36_df %>% dplyr::select(-c('any_surf', 'mat_ethn', 'hosp_dc_ga'))
+trach_36_df_mice_out <- mice(trach_36_df[,-1], m = 5, ignore = ignore, print = FALSE, seed = 2550)
+
+imp.train <- filter(trach_36_df_mice_out, !ignore)
+# imp.train$data
+
+# Store each imputed data set
+trach_36_df_imp_train <- vector("list",5)    
+for (i in 1:5){
+  trach_36_df_imp_train[[i]] <- mice::complete(imp.train,i) 
+}
+# trach_36_df_imp_train[[1]]
+
+# Store imputated the test data 
+imp.test <- filter(trach_36_df_mice_out, ignore)
+trach_36_df_imp_test <- vector("list",5)    
+for (i in 1:5){
+  trach_36_df_imp_test[[i]] <- mice::complete(imp.test,i) 
+}
+# trach_36_df_imp_test[[2]]
+trach_36_df_test <- rbindlist(trach_36_df_imp_test)
+```
+
+## Variables Selection for the 36-week Model
+
+```{r, warning=FALSE}
+##== Lasso at 36-week 
+  
+lasso <- function(df) { 
+  #' Runs 10-fold CV for lasso and returns corresponding coefficients 
+  #' @param df, data set
+  #' @return coef, coefficients for minimum cv error
+  
+  # Matrix form for ordered variables  
+  x.ord <- model.matrix(adverse_outcome ~., data = df)[,-1] #this model.matrix is the place to add interaction and transformation, and run summary of model after cross validation; if transformation and interaction not work well, review x.ord and change form of covariates, and rerun cross validation
+
+  y.ord <- df$adverse_outcome
+  
+  # Generate folds
+  k <- 10
+  set.seed(1)
+  folds <- sample(1:k, nrow(df), replace=TRUE)
+  # Lasso model
+  lasso_mod_cv <- cv.glmnet(x.ord, y.ord, nfolds = 10, foldid = folds, 
+                         alpha = 1, family = "binomial") 
+  
+  lasso_mod <- glmnet(x.ord, y.ord, nfolds = 10, foldid=folds,
+                      alpha=1, family = "binomial",
+                      lambda = lasso_mod_cv$lambda.min)
+  # Get coefficients 
+  coef <- coef(lasso_mod)
+  return(coef)
+} 
+
+# Find average lasso coefficients over imputed datasets
+lasso_coef1 <- lasso(trach_36_df_imp_train[[1]]) 
+lasso_coef2 <- lasso(trach_36_df_imp_train[[2]]) 
+lasso_coef3 <- lasso(trach_36_df_imp_train[[3]]) 
+lasso_coef4 <- lasso(trach_36_df_imp_train[[4]]) 
+lasso_coef5 <- lasso(trach_36_df_imp_train[[5]]) 
+lasso_coef <- cbind(lasso_coef1, lasso_coef2, lasso_coef3, 
+                    lasso_coef4, lasso_coef5) 
+lasso_coef_df <- data.frame(variables =  rownames(as.data.frame(as.matrix(lasso_coef1))),
+                            coef1 = as.data.frame(as.matrix(lasso_coef1))[,1],
+                            coef2 = as.data.frame(as.matrix(lasso_coef2))[,1],
+                            coef3 = as.data.frame(as.matrix(lasso_coef3))[,1],
+                            coef4 = as.data.frame(as.matrix(lasso_coef4))[,1],
+                            coef5 = as.data.frame(as.matrix(lasso_coef5))[,1])
+lasso_coef_df$lasso_coef_final_avg <- apply(lasso_coef_df[,-1], 1, mean) 
+
+times_zero <- vector()
+for (i in 1:nrow(lasso_coef_df)){
+    times_zero_temp <- sum(lasso_coef_df[i,2:6] == 0)
+    times_zero <- c(times_zero, times_zero_temp)
+}
+lasso_coef_df$times_zero <- times_zero
+lasso_coef_df$lasso_coef_final2 <- lasso_coef_df$lasso_coef_final_avg
+lasso_coef_df$lasso_coef_final2[lasso_coef_df$times_zero >= 3] <- 0
+
+lasso_coef_table <- data.frame(cbind(c(lasso_coef_df$variables), lasso_coef_df$lasso_coef_final_avg, lasso_coef_df$lasso_coef_final2))
+rownames(lasso_coef_table) <- lasso_coef_df$variables
+colnames(lasso_coef_table) <- c("Variable", "Lasso1", "Lasso2")
+lasso_coef_table <- lasso_coef_table[,-c(1)]
+lasso_coef_table <- lasso_coef_table[lasso_coef_table$Lasso1!=0,]
+lasso_coef_table$Lasso1 <- as.numeric(lasso_coef_table$Lasso1)
+lasso_coef_table$Lasso2 <- as.numeric(lasso_coef_table$Lasso2)
+lasso_coef_table %>% round(3) %>% kable(caption = "Coefficients of Lasso Regression Method for 36-week",
+                                      align = "c", booktabs = T, longtable = T) %>%  kable_styling(latex_options = "striped")
+```
+
+```{r, warning=FALSE}
+##== Forward stepwise selection
+
+# Set seed for reproducibility
+set.seed(1)
+# Set up repeated k-fold cross-validation
+train.control <- trainControl(method = "cv", number = 10)
+  step.model.1 <- train(adverse_outcome ~., data = trach_36_df_imp_train[[1]],
+                    method = "glmStepAIC", 
+                    family = "binomial",
+                    trControl = train.control, 
+                    trace = F)
+  forward_coef.1 <- coef(step.model.1$finalModel, 4)
+  
+  step.model.2 <- train(adverse_outcome ~., data = trach_36_df_imp_train[[2]],
+                    method = "glmStepAIC", 
+                    family = "binomial",
+                    trControl = train.control, 
+                    trace = F)
+  forward_coef.2 <- coef(step.model.2$finalModel, 4)
+  
+  step.model.3 <- train(adverse_outcome ~., data = trach_36_df_imp_train[[3]],
+                    method = "glmStepAIC", 
+                    family = "binomial",
+                    trControl = train.control, 
+                    trace = F)
+  forward_coef.3 <- coef(step.model.3$finalModel, 4)
+  
+  step.model.4 <- train(adverse_outcome ~., data = trach_36_df_imp_train[[4]],
+                    method = "glmStepAIC", 
+                    family = "binomial",
+                    trControl = train.control, 
+                    trace = F)
+  forward_coef.4 <- coef(step.model.4$finalModel, 4)
+  
+  step.model.5 <- train(adverse_outcome ~., data = trach_36_df_imp_train[[5]],
+                    method = "glmStepAIC", 
+                    family = "binomial",
+                    trControl = train.control, 
+                    trace = F)
+  forward_coef.5 <- coef(step.model.5$finalModel, 4)
+
+# form the table
+forward_coef_table <- data.frame(cbind(c(lasso_coef_df$variables[1:18]), lasso_coef_df$lasso_coef_final_avg[1:18]))
+rownames(forward_coef_table) <- lasso_coef_df$variables[1:18]
+colnames(forward_coef_table) <- c("Variable", "Lasso")
+forward_coef_table$Forward.1 <- 0 
+forward_coef_table$Forward.2 <- 0 
+forward_coef_table$Forward.3 <- 0 
+forward_coef_table$Forward.4 <- 0 
+forward_coef_table$Forward.5 <- 0 
+forward_coef_table[names(forward_coef.1), "Forward.1"] <- forward_coef.1
+forward_coef_table[names(forward_coef.2), "Forward.2"] <- forward_coef.2
+forward_coef_table[names(forward_coef.3), "Forward.3"] <- forward_coef.3
+forward_coef_table[names(forward_coef.4), "Forward.4"] <- forward_coef.4
+forward_coef_table[names(forward_coef.5), "Forward.5"] <- forward_coef.5
+forward_coef_table <- forward_coef_table[, -c(1,2)]
+forward_coef_table$forward_coef_final_avg <-  apply(forward_coef_table, 1, mean)
+
+forward_coef_table$Average <- forward_coef_table$forward_coef_final_avg
+forward_coef_table[,-6] %>% round(3) %>% 
+  kbl(
+        caption = "Coefficients of Forward Stepwise Selection Method for 36-week",
+        align = "c",
+        booktabs = T,
+        longtable = T) %>% 
+  kable_styling(full_width = F, latex_options = "striped")
+  # row_spec(c(16, 22, 23, 24, 26), font_size=9)
+```
+
+After multiple imputation method, we have 5 imputed datasets for which we do cross-validation in each imputed training dataset. Cross-validation helps with overfitting issues and with generalizability of the lasso model. Then since we will have for each fold in cross-validation results for different lambdas, we choose the lambda that has the lowest model error. This means that we will have five sets of estimated coefficients (one for each imputed data set). We considered two possible solutions to generate final lasso model: The first method **Lasso 1** is simply averaging over all 5 sets of coefficients to obtain the final lasso model. The second method **Lasso 2** is counting the number of times each variable being selected, if more than or equal to 3 times the variable was not selected, we will force to remove the variable from the final lasso model. In other words, if some variables occasionally were not selected, we wanted to neglect occasional situations and averaging over all estimated coefficients from 5 imputation datasets. In order to include transformations or interactions in the model, it is needed to have an idea of which interactions or transformations need to be included based on explanatory analysis or prior professional knowledge before applying the cross-validation to the imputed datasets. So first, after we have the imputed data, we fit the lasso model and evaluate variables' significance by running summary of model after cross-validation. Table 3 provides us with a list of final estimated coefficients under lasso models of 10-fold cross-validation stratified by outcome in the train imputation datasets.
+
+Except for lasso regression models, to preserve generalizability and overfitting, we remove  center, include main effects of covariates, and perform forward stepwise selection with cross-validation for each imputed data set. Starting with the empty model and sequentially adding predictors to the model, one at a time, and choosing the best predictor at each step based on a criterion like AIC and BIC, but it can be seen as a "locally optimal", instead of globally optimal in the sense of the best subset. Table 4 provides coefficients for each imputed data set and averaging over 5 coefficients together to obtain the final forward stepwise model. To compare the estimated coefficients using different variable selection or shrinkage methods we found that intercept values vary a lot across different methods, with lasso method having the most negative value (-4.009), which means the log odds of adverse outcome while all other variables are held at zero. For variables with non-zero coefficients, a positive coefficient indicates a positive association between the variable and the odds of outcome. In forward selection model, `pre_nat_sterYes` has a positive average coefficient (0.505), indicating that having a prenatal corticosteroids are 0.505 times the odds of adverse outcome compared to those who did not have prenatal corticosteroids. Conversely, weight at 36 weeks (-0.001) is negatively associated with the odds of adverse outcome, even though it is least likely to have adverse outcome compared to other covariates adjusting for remaining variables. For those variables with zero coefficients all 5 times represents the least importance to be include in predicting adverse outcome of patients.
+
+## Variables Selection for the 44-week Model
+
+We explore important variables when data on 44 weeks are available and investigate mixed-effect models guided by Lasso and forward stepwise methods to estimate coefficients for important variables and random effects for center. Table 5 presents the coefficients for two Lasso regression models. Lasso (Least Absolute Shrinkage and Selection Operator) regression is a type of linear regression that uses shrinkage and is particularly useful when we want to automate certain parts of variables included in models. The intercept term (-5.871) represents the odds of adverse outcome when all predictors are zero. The coefficients represent the association between each predictor and the outcome variable. A coefficient of 0.000 would suggest no association under the Lasso regression constraints. The `inspired_oxygen` related variables have a coefficient of 2.433 at 36 weeks and a coefficient of 1.014 at 44 weeks, suggesting for each unit increase in fraction of inspired oxygen at 36 and 44 weeks is associated with 2.433 or 1.014 times the odds of adverse outcome adjusting for other covariates. The fact that some coefficients are exactly zero is a feature of Lasso regression, which help us determine variables in the mixed-effect model.
+
+```{r, warning=FALSE}
+set.seed(123)
+ignore2 <- sample(c(TRUE, FALSE), size = nrow(trach_44_df), replace = TRUE, prob = c(0.25, 0.75))
+
+trach_44_df <- trach_44_df %>% dplyr::select(-c('any_surf', 'mat_ethn', 'hosp_dc_ga'))
+trach_44_df_mice_out <- mice(trach_44_df[,-1], m = 5, ignore = ignore, print = FALSE, seed = 2550)
+
+imp.train <- filter(trach_44_df_mice_out, !ignore2)
+
+# Store each imputed data set
+trach_44_df_imp_train <- vector("list",5)    
+for (i in 1:5){
+  trach_44_df_imp_train[[i]] <- mice::complete(imp.train,i) 
+}
+
+# Store imputated the test data 
+imp.test <- filter(trach_44_df_mice_out, ignore2)
+trach_44_df_imp_test <- vector("list",5)    
+for (i in 1:5){
+  trach_44_df_imp_test[[i]] <- mice::complete(imp.test,i) 
+}
+trach_44_df_test <- rbindlist(trach_44_df_imp_test)
+```
+
+```{r, warning=FALSE}
+##== Lasso at 44-week 
+  
+lasso <- function(df) { 
+  #' Runs 10-fold CV for lasso and returns corresponding coefficients 
+  #' @param df, data set
+  #' @return coef, coefficients for minimum cv error
+  
+  # Matrix form for ordered variables  
+  x.ord <- model.matrix(adverse_outcome ~., data = df)[,-1] #this model.matrix is the place to add interaction and transformation, and run summary of model after cross validation; if transformation and interaction not work well, review x.ord and change form of covariates, and rerun cross validation
+
+  y.ord <- df$adverse_outcome
+  
+  # Generate folds
+  k <- 10
+  set.seed(1)
+  folds <- sample(1:k, nrow(df), replace=TRUE)
+  # Lasso model
+  lasso_mod_cv <- cv.glmnet(x.ord, y.ord, nfolds = 10, foldid = folds, 
+                         alpha = 1, family = "binomial") 
+  
+  lasso_mod <- glmnet(x.ord, y.ord, nfolds = 10, foldid=folds,
+                      alpha=1, family = "binomial",
+                      lambda = lasso_mod_cv$lambda.min)
+  # Get coefficients 
+  coef <- coef(lasso_mod)
+  return(coef)
+} 
+
+# Find average lasso coefficients over imputed datasets
+lasso_coef1 <- lasso(trach_44_df_imp_train[[1]]) 
+lasso_coef2 <- lasso(trach_44_df_imp_train[[2]]) 
+lasso_coef3 <- lasso(trach_44_df_imp_train[[3]]) 
+lasso_coef4 <- lasso(trach_44_df_imp_train[[4]]) 
+lasso_coef5 <- lasso(trach_44_df_imp_train[[5]]) 
+lasso_coef <- cbind(lasso_coef1, lasso_coef2, lasso_coef3, 
+                    lasso_coef4, lasso_coef5) 
+lasso_coef_df_44 <- data.frame(variables =  rownames(as.data.frame(as.matrix(lasso_coef1))),
+                            coef1 = as.data.frame(as.matrix(lasso_coef1))[,1],
+                            coef2 = as.data.frame(as.matrix(lasso_coef2))[,1],
+                            coef3 = as.data.frame(as.matrix(lasso_coef3))[,1],
+                            coef4 = as.data.frame(as.matrix(lasso_coef4))[,1],
+                            coef5 = as.data.frame(as.matrix(lasso_coef5))[,1])
+lasso_coef_df_44$lasso_coef_final_avg <- apply(lasso_coef_df_44[,-1], 1, mean) 
+
+times_zero <- vector()
+for (i in 1:nrow(lasso_coef_df_44)){
+    times_zero_temp <- sum(lasso_coef_df_44[i,2:6] == 0)
+    times_zero <- c(times_zero, times_zero_temp)
+}
+lasso_coef_df_44$times_zero <- times_zero
+lasso_coef_df_44$lasso_coef_final2 <- lasso_coef_df_44$lasso_coef_final_avg
+lasso_coef_df_44$lasso_coef_final2[lasso_coef_df_44$times_zero >= 3] <- 0
+
+lasso_coef_table_44 <- data.frame(cbind(c(lasso_coef_df_44$variables), lasso_coef_df_44$lasso_coef_final_avg, lasso_coef_df_44$lasso_coef_final2))
+rownames(lasso_coef_table_44) <- lasso_coef_df_44$variables
+colnames(lasso_coef_table_44) <- c("Variable", "Lasso1", "Lasso2")
+lasso_coef_table_44 <- lasso_coef_table_44[,-c(1)]
+lasso_coef_table_44 <- lasso_coef_table_44[lasso_coef_table_44$Lasso1!=0,]
+lasso_coef_table_44$Lasso1 <- as.numeric(lasso_coef_table_44$Lasso1)
+lasso_coef_table_44$Lasso2 <- as.numeric(lasso_coef_table_44$Lasso2)
+lasso_coef_table_44 %>% round(3) %>% kable(caption = "Coefficients of Lasso Regression Method for 44-week",
+                                      align = "c", booktabs = T, longtable = T) %>%  kable_styling(latex_options = "striped")
+```
+
+Forward Stepwise Selection is a type of model building that begins with no variables in the model, tests the addition of each variable using a chosen model fit criterion, adding the variable (if any) whose inclusion gives the most statistically significant improvement of the fit, and repeats this process until none improves the model to a significant extent. The process results in different coefficients across the models as variables are added one at a time based on their statistical significance.
+Table 6 shows the results of a forward stepwise selection regression analysis over five imputed training sets (Forward.1 to Forward.5) and their average coefficients. These two methods are trying to determine the factors that affect adverse outcome when records on both 36 weeks and 44 weeks are available.
+
+```{r, warning=FALSE}
+##== Forward stepwise selection
+
+# Set seed for reproducibility
+set.seed(1)
+# Set up repeated k-fold cross-validation
+train.control <- trainControl(method = "cv", number = 10)
+  step.model.1 <- train(adverse_outcome ~., data = trach_44_df_imp_train[[1]],
+                    method = "glmStepAIC", 
+                    family = "binomial",
+                    trControl = train.control, 
+                    trace = F)
+  forward_coef.1 <- coef(step.model.1$finalModel, 4)
+  
+  step.model.2 <- train(adverse_outcome ~., data = trach_44_df_imp_train[[2]],
+                    method = "glmStepAIC", 
+                    family = "binomial",
+                    trControl = train.control, 
+                    trace = F)
+  forward_coef.2 <- coef(step.model.2$finalModel, 4)
+  
+  step.model.3 <- train(adverse_outcome ~., data = trach_44_df_imp_train[[3]],
+                    method = "glmStepAIC", 
+                    family = "binomial",
+                    trControl = train.control, 
+                    trace = F)
+  forward_coef.3 <- coef(step.model.3$finalModel, 4)
+  
+  step.model.4 <- train(adverse_outcome ~., data = trach_44_df_imp_train[[4]],
+                    method = "glmStepAIC", 
+                    family = "binomial",
+                    trControl = train.control, 
+                    trace = F)
+  forward_coef.4 <- coef(step.model.4$finalModel, 4)
+  
+  step.model.5 <- train(adverse_outcome ~., data = trach_44_df_imp_train[[5]],
+                    method = "glmStepAIC", 
+                    family = "binomial",
+                    trControl = train.control, 
+                    trace = F)
+  forward_coef.5 <- coef(step.model.5$finalModel, 4)
+
+# form the table
+forward_coef_table_44 <- data.frame(cbind(c(lasso_coef_df_44$variables[1:24]), lasso_coef_df_44$lasso_coef_final_avg[1:24]))
+rownames(forward_coef_table_44) <- lasso_coef_df_44$variables[1:24]
+colnames(forward_coef_table_44) <- c("Variable", "Lasso")
+forward_coef_table_44$Forward.1 <- 0 
+forward_coef_table_44$Forward.2 <- 0 
+forward_coef_table_44$Forward.3 <- 0 
+forward_coef_table_44$Forward.4 <- 0 
+forward_coef_table_44$Forward.5 <- 0 
+forward_coef_table_44[names(forward_coef.1), "Forward.1"] <- forward_coef.1
+forward_coef_table_44[names(forward_coef.2), "Forward.2"] <- forward_coef.2
+forward_coef_table_44[names(forward_coef.3), "Forward.3"] <- forward_coef.3
+forward_coef_table_44[names(forward_coef.4), "Forward.4"] <- forward_coef.4
+forward_coef_table_44[names(forward_coef.5), "Forward.5"] <- forward_coef.5
+forward_coef_table_44 <- forward_coef_table_44[, -c(1,2)]
+forward_coef_table_44$forward_coef_final_avg <-  apply(forward_coef_table_44, 1, mean)
+forward_coef_table_44$Average <- forward_coef_table_44$forward_coef_final_avg
+
+forward_coef_table_44[,-6] %>% round(3) %>%
+  kbl(caption = "Coefficients of Forward Stepwise Selection Method for 44-week",
+        align = "c",
+        booktabs = T,
+        longtable = T) %>%
+  kable_styling(latex_options = "striped")
+```
+
+
+
+# Internal Validation
+## Mixed-effects Models for 36-week data
+Given important fixed-effect variables selected from Lasso 2 and forward stepwise methods, we fit the mixed-effects models for 36-weeks, which is considered `center` as a random effect. We choose significant variables and center and fit the model using the `glmer()` function in the combined 5 imputed training set for 36-weeks only and finally derive new estimated coefficients of variables in the mixed-effect models under Lasso 2 and forward stepwise methods, respectively. The below table depicts estimated center-specific intercepts in two mix-effect models guided by Lasso and forward stepwise selections. We then apply new mix-effect models to predict outcome in the internal validation set derived from a combination of 5 imputed test sets. 
+
+```{r}
+combine_train <- rbind(trach_36_df_imp_train[[1]],trach_36_df_imp_train[[2]],trach_36_df_imp_train[[3]],trach_36_df_imp_train[[4]], trach_36_df_imp_train[[5]])
+combine_train$center <- rep(filter(trach_36_df, !ignore)$center,5)
+mod_36 <- glmer(adverse_outcome ~ birth_hc + prenat_ster + com_prenat_ster + gender + sga + weight_today.36 + ventilation_support_level.36 + inspired_oxygen.36 + peep_cm_h2o_modified.36 + med_ph.36 + (1 | center),
+              data = combine_train ,
+              family = binomial) 
+
+mod_36_forward <- glmer(adverse_outcome ~ bw + blength + birth_hc + prenat_ster + sga + weight_today.36 + ventilation_support_level.36 + inspired_oxygen.36 + p_delta.36 + peep_cm_h2o_modified.36 + med_ph.36 + (1 | center),
+              data = combine_train ,
+              family = binomial) 
+mod_36_summary <- mod_36 %>% summary() %>% coef()
+
+mod_36_fe_coef <- mod_36_summary[,c(1,4)] %>% round(3) %>%
+  kable(col.names = c("Estimate", "P-value"),
+      caption = "Estimated Coefficients of the Mix Model for 36-weeks by Lasso Method",
+      booktabs=T, escape=F, align = "c", longtable = T)%>%
+  kable_styling(latex_options = c('striped'))
+
+mod_36_forw_summary <- mod_36_forward %>% summary() %>% coef()
+mod_36_forward_fe_coef <- mod_36_forw_summary[,c(1,4)] %>% round(3) %>%
+  kable(col.names = c("Estimate", "P-value"),
+      caption = "Estimated Coefficients of the Mix Model for 36-weeks by Forward Stepwise Method",
+      booktabs=T, escape=F, align = "c", longtable = T)%>%
+  kable_styling(latex_options = c('striped'))
+
+mod_36_re_coef <- ranef(mod_36)$center %>% 
+  kable(
+      caption = "Estimated Random Effects of Center in the Mix Model for 36-weeks by Lasso",
+      booktabs=T, escape=F, align = "c", longtable = T)%>%
+  kable_styling(latex_options = c('striped'))
+
+mod_36_forward_re_coef <- ranef(mod_36_forward)$center %>% 
+  kable(col.names = c("Intercept"),
+      caption = "Estimated Random Effects of Center in the Mix Model for 36-weeks by Forward Stepwise",
+      booktabs=T, escape=F, align = "c", longtable = T)%>%
+  kable_styling(latex_options = c('striped'))
+
+cbind(ranef(mod_36)$cente, ranef(mod_36_forward)$center) %>% 
+  kable(col.names = c("Lasso", "Forward"),
+      caption = "Estimated Random Effects of Center in the Mix Model for 36-weeks by Lasso and Forward Stepwise Methods",
+      booktabs=T, escape=F, align = "c", longtable = T)%>%
+  kable_styling(latex_options = c('striped'))
+
+```
+
+```{r}
+trach_36_df_test$center <- rep(filter(trach_36_df, ignore)$center,5)
+mod_36_test_out <- predict(mod_36, newdata = trach_36_df_test, allow.new.levels = TRUE)
+mod_36_test_pred <- ifelse(mod_36_test_out < 0.5, 0, 1)
+
+mod_36_forw_test_out <- predict(mod_36_forward, newdata = trach_36_df_test, re.form = ~(1|center), allow.new.levels = TRUE)
+mod_36_forw_test_pred <- ifelse(mod_36_forw_test_out < 0.5, 0, 1)
+```
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+par(mfrow = c(1,3))
+roc_mod_36 <- roc(predictor=mod_36_test_out , 
+               response=trach_36_df_test$adverse_outcome, 
+               levels = c(0,1), direction = "<")
+# plot(roc_mod_36, print.auc=TRUE, print.thres = TRUE, main = "ROC for Lasso 2")
+
+roc_mod_36_forward <- roc(predictor=mod_36_forw_test_out, 
+               response=as.factor(trach_36_df_test$adverse_outcome), 
+               levels = c(0,1), direction = "<")
+# plot(roc_mod_36_forward, print.auc=TRUE, print.thres = TRUE, main = "ROC for forward")
+
+coords(roc=roc_mod_36, x = "best")
+coords(roc=roc_mod_36_forward, x = "best")
+auc(roc_mod_36)[1]
+auc(roc_mod_36_forward)[1]
+mean((mod_36_test_pred - (as.numeric(trach_36_df_test$adverse_outcome)-1))^2)
+mean((mod_36_forw_test_pred - (as.numeric(trach_36_df_test$adverse_outcome)-1))^2)
+```
+
+We validated the mixed-effect models for 36-weeks by assessing their performance in the internal validation dataset obtained from multiple imputation method. Then we choose the best thresholds obtained from ROC curves to cutoff the binary predicted adverse outcome. Then we use AUC, specificity, sensitivity, and Brier scores to evaluate model performance in validation set. According to scores and graphical means, we can look at how well our model differentiates between the two classes.  By comparison, the lasso model on the test data (AUC = 88.7%) explains the outcome of adverse outcome is slightly better than forward stepwise methods. For both models, the AUC is quite high (0.887 for Lasso and 0.882 for forward), indicating good model performance. Sensitivity, also known as the true positive rate, measures the proportion of actual positives that are correctly identified. The Lasso model has a sensitivity of 0.830, and the Forward model has a slightly lower sensitivity of 0.826. Specificity, also known as the true negative rate, measures the proportion of actual negatives that are correctly identified. The Lasso model shows a specificity of 0.827, and the forward model has a slightly lower specificity of 0.810. The Brier score measures the accuracy of probabilistic predictions. It is a score of 0 for a perfect model and 1 for a model that performs no better than random chance. Here, the Lasso model has a Brier score of 0.140 and the forward model has a slightly higher Brier score of 0.144, indicating the Lasso is slightly more accurate in its predictions when birth and 36-weeks data are considered in the model. 
+
+
+```{r}
+confu.test.36 <- data.frame(
+  Sensitivity = c(0.830, 0.826),
+  Specificity = c(0.827, 0.810),
+  AUC = c(0.887,0.882),
+  Brier = c(0.140, 0.144)) 
+
+rownames(confu.test.36) <- c("Lasso", "Forward")
+confu.test.36 %>%
+  kable(
+      caption = "Performance Matrices of Mix-effects Models for 36 weeks in Test Set",
+      booktabs=T, escape=F, align = "c")%>%
+  kable_styling(full_width = T, latex_options = c('HOLD_position'))
+```
+
+
+## Mixed-effects Models for 44-week data
+```{r}
+combine_train_44 <- rbind(trach_44_df_imp_train[[1]],trach_44_df_imp_train[[2]],trach_44_df_imp_train[[3]],trach_44_df_imp_train[[4]], trach_44_df_imp_train[[5]])
+combine_train_44$center <- rep(filter(trach_44_df, !ignore)$center,5)
+mod_44 <- glmer(adverse_outcome ~ prenat_ster + com_prenat_ster + ventilation_support_level.36 + inspired_oxygen.36 + peep_cm_h2o_modified.36 + weight_today.44 + ventilation_support_level_modified.44 + inspired_oxygen.44 + p_delta.44 + peep_cm_h2o_modified.44 + med_ph.44 + (1 | center),
+              data = combine_train_44 ,
+              family = binomial) 
+
+mod_44_forward <- glmer(adverse_outcome ~ bw + prenat_ster + sga + weight_today.36 + ventilation_support_level.36 + inspired_oxygen.36 + p_delta.36 + peep_cm_h2o_modified.36 + weight_today.44 + ventilation_support_level_modified.44 + inspired_oxygen.44 + med_ph.44 + (1 | center),
+              data = combine_train_44 ,
+              family = binomial) 
+mod_44_summary <- mod_44 %>% summary() %>% coef()
+mod_44_fe_coef <- mod_44_summary[,c(1,4)] %>% round(3) %>%
+  kable(
+      caption = "Estimated Coefficients of the Mix Model for 44-weeks by Lasso Method",
+      booktabs=T, escape=F, align = "c", longtable = T)%>%
+  kable_styling(full_width = FALSE, latex_options = c('striped'))
+
+mod_44_forw_summary <- mod_44_forward %>% summary() %>% coef() 
+mod_44_forward_fe_coef <- mod_44_forw_summary[,c(1,4)] %>% round(3) %>%
+  kable(
+      caption = "Estimated Coefficients of the Mix Model for 44-weeks by Forward Stepwise Method",
+      booktabs=T, escape=F, align = "c", longtable = T)%>%
+  kable_styling(full_width = FALSE, latex_options = c('striped'))
+
+mod_44_re_coef <- ranef(mod_44)$center %>% 
+  kable(
+      caption = "Estimated Random Effects of Center in the Mix Model for 44-weeks by Lasso",
+      booktabs=T, escape=F, align = "c", longtable = T)%>%
+  kable_styling(full_width = T, latex_options = c('striped'))
+
+
+mod_44_forward_re_coef <- ranef(mod_44_forward)$center %>% 
+  kable(col.names = c("Intercept"),
+      caption = "Estimated Random Effects of Center in the Mix Model for rr-weeks by Forward Stepwise",
+      booktabs=T, escape=F, align = "c", longtable = T)%>%
+  kable_styling(full_width = T, latex_options = c('striped'))
+
+cbind(ranef(mod_44)$cente, ranef(mod_44_forward)$center) %>% 
+  kable(col.names = c("Lasso", "Forward"),
+      caption = "Estimated Random Effects of Center in the Mix Model for 44-weeks by Lasso and Forward Stepwise Methods",
+      booktabs=T, escape=F, align = "c", longtable = T)%>%
+  kable_styling(latex_options = c('striped'))
+```
+
+```{r}
+trach_44_df_test$center <- rep(filter(trach_44_df, ignore)$center,5)
+mod_44_test_out <- predict(mod_44, newdata = trach_44_df_test, re.form = ~(1|center), allow.new.levels = TRUE)
+mod_44_test_pred <- ifelse(mod_44_test_out < 0.5, 0, 1)
+
+mod_44_forw_test_out <- predict(mod_44_forward, newdata = trach_44_df_test, re.form = ~(1|center), allow.new.levels = TRUE)
+mod_44_forw_test_pred <- ifelse(mod_44_forw_test_out < 0.5, 0, 1)
+```
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+library(pROC)
+par(mfrow = c(1,3))
+roc_mod_44 <- roc(predictor=mod_44_test_out , 
+               response=trach_44_df_test$adverse_outcome, 
+               levels = c(0,1), direction = "<")
+# plot(roc_mod_44, print.auc=TRUE, print.thres = TRUE, main = "ROC for Lasso 2")
+
+roc_mod_44_forward <- roc(predictor=mod_44_forw_test_out, 
+               response=as.factor(trach_44_df_test$adverse_outcome), 
+               levels = c(0,1), direction = "<")
+# plot(roc_mod_44_forward, print.auc=TRUE, print.thres = TRUE, main = "ROC for forward")
+
+coords(roc=roc_mod_44, x = "best")
+coords(roc=roc_mod_44_forward, x = "best")
+auc(roc_mod_44)[1]
+auc(roc_mod_44_forward)[1]
+mean((mod_44_test_pred - (as.numeric(trach_44_df_test$adverse_outcome)-1))^2)
+mean((mod_44_forw_test_pred - (as.numeric(trach_44_df_test$adverse_outcome)-1))^2)
+```
+
+
+```{r, eval=FALSE}
+num_cuts <- 10
+calib_data_lasso1 <-  data.frame(prob = abs(mod_36_test_out),
+                          bin = cut(abs(mod_36_test_out), breaks = num_cuts),
+                          class = as.numeric(trach_36_df_test$adverse_outcome)-1)
+calib_data_lasso1 <- calib_data_lasso1 %>% 
+             dplyr::group_by(bin) %>% 
+             dplyr::summarize(observed = sum(class)/n(), 
+                       expected = sum(prob)/n(), 
+                       se = sqrt(observed*(1-observed)/n()))
+
+lasso1 <- ggplot(calib_data_lasso1) + 
+  geom_point(aes(x = expected, y = observed)) +
+  geom_errorbar(aes(x = expected, ymin=observed-1.96*se, 
+                    ymax=observed+1.96*se), 
+                colour="black", width=.01)+
+  geom_abline(intercept = 0, slope = 1, color="red") +
+  
+  labs(x="Expected Proportion", y="Observed Proportion", title = "Calibratioin for Lasso Method 1") +
+  theme_minimal()
+```
+
+
+```{r, eval=FALSE}
+calib_data_forward <-  data.frame(prob = test_y_forward,
+                          bin = cut(test_y_forward, breaks = num_cuts),
+                          class = as.numeric(trach_36_df_test$adverse_outcome)-1)
+calib_data_forward <- calib_data_forward %>% 
+             group_by(bin) %>% 
+             summarize(observed = sum(class)/n(), 
+                       expected = sum(prob)/n(), 
+                       se = sqrt(observed*(1-observed)/n()))
+forward <- ggplot(calib_data_forward) + 
+  geom_errorbar(aes(x = expected, ymin=observed-1.96*se, 
+                    ymax=observed+1.96*se), 
+                colour="black", width=.01)+
+  geom_point(aes(x = expected, y = observed)) +
+    geom_abline(intercept = 0, slope = 1, color="red") + 
+  labs(x="Expected Proportion", y="Observed Proportion", title = "Calibratioin Plot for Forward Stepwise Selection") +
+  theme_minimal()
+```
+
+```{r, message=FALSE, eval=FALSE}
+library(gridExtra)
+grid.arrange(lasso1, lasso2, forward, ncol = 2)
+```
+
+Table 10 shows performance matrices of mix-effects models for 44 weeks in the combined test set. As for sensitivity, the Lasso model maintains the same sensitivity as at 36 weeks (0.830), but the forward model sees a significant increase to 0.889. Also, there is a notable increase in specificity for the Lasso model to 0.866, indicating better performance in correctly identifying true negatives at 44 weeks compared to 36 weeks. However, the forward model sees a decrease in specificity to 0.823. The AUC values have increased for both models, with the Lasso model at 0.913 and the forward model at 0.915. This suggests that both models are better at distinguishing between the classes at 44 weeks than at 36 weeks. However, the Brier scores have slightly increased, indicating a reduction in predictive accuracy, with Lasso model's Brier score of 0.151 and the forward model's score of 0.145.
+
+```{r}
+confu.test.44 <- data.frame(
+  Sensitivity = c(0.830, 0.889),
+  Specificity = c(0.866, 0.823),
+  AUC = c(0.913,0.915),
+  Brier = c(0.151, 0.145)) 
+
+rownames(confu.test.44) <- c("Lasso", "Forward")
+confu.test.44 %>%
+  kable(
+      caption = "Performance Matrices of Mix-effects Models for 44 weeks in Test Set",
+      booktabs=T, escape=F, align = "c")%>%
+  kable_styling(full_width = T, latex_options = c('HOLD_position'))
+```
+
+
+# Conclusions and Limitations
+In summary, the forward model exhibited a notable enhancement in sensitivity from 36 to 44 weeks, signifying its improved ability to accurately identify true positives in the 44-week mixed-effect model. Conversely, the Lasso model displayed an improved level of specificity during this transition, indicating its enhanced capability to correctly identify true negatives. Both mixed-effects models demonstrated a higher AUC at 44 weeks, reflecting an overall improved classification performance when incorporating covariates measured at this stage. However, it's important to note that the Brier score increased for both models, indicating a slight reduction in the accuracy of probabilistic predictions as patients aged from 36 to 44 weeks.
+
+These conclusions stem from a medical study evaluating the necessity for Tracheostomy or adverse outcomes, with the 44-week models generally exhibiting superior predictive performance compared to the 36-week models. Specifically, in the 36-week models, birth-related variables such as birth weight, height, and head circumference showed significance in predicting adverse outcomes based on small p-values ($\leq 0.05$) for estimated coefficients. Additionally, respiratory-related variables such as ventilation support levels, fraction of inspired oxygen, peak inspiratory pressure, and exploratory pressure played significant roles in prediction. In contrast, the 44-week models included critical variables such as prenatal corticosteroids, complete prenatal steroids, and respiratory parameters measured at 36 weeks, including inspired oxygen and ventilation support levels. Furthermore, parameters measured at 44 weeks, such as medication for pulmonary hypertension, peak inspiratory pressure, positive end exploratory pressure, ventilation support levels, and fraction of inspired oxygen, emerged as crucial factors in predicting the need for Tracheostomy placement or mortality.
+
+However, it's important to acknowledge the limitations of our findings. First, the multiple imputation method, while providing more unbiased estimates than single imputation, may not be highly reliable due to potential violations of assumptions, especially in the presence of missing not-at-random (MNAR) data and limitations in sample size. Secondly, to ensure against overfitting and enhance generalizability, we should consider the myriad potential interaction terms and transformations. Nevertheless, it's worth noting that the forward stepwise method has its own limitations, as it can only be regarded as "locally optimal" rather than globally optimal in terms of selecting the best subset of variables. Therefore, future improvement analyses should incorporate the best subset method and assess predictive accuracy among these three variable selection methods for a more comprehensive evaluation.
+
+\newpage
+# References
+
